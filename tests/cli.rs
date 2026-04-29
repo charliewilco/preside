@@ -44,6 +44,40 @@ fn set_creates_config_and_updates_fields() {
 }
 
 #[test]
+fn add_creates_a_complete_service() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+
+    pp(&home)
+        .args([
+            "add",
+            "personal",
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--command",
+            "npm run dev",
+            "--port",
+            "8712",
+            "--domain",
+            "personal.local",
+            "--readiness",
+            "process",
+            "--env",
+            "NODE_ENV=development",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added personal"));
+
+    pp(&home)
+        .args(["info", "personal", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"readiness\": \"process\""))
+        .stdout(predicate::str::contains("\"NODE_ENV\": \"development\""));
+}
+
+#[test]
 fn set_updates_flat_xdg_config_when_it_exists() {
     let home = TempDir::new().unwrap();
     let config_dir = home.path().join(".config");
@@ -86,6 +120,19 @@ fn list_shows_configured_services() {
         .stdout(predicate::str::contains("8712"))
         .stdout(predicate::str::contains("personal.local"))
         .stdout(predicate::str::contains("~/Code/personal"));
+}
+
+#[test]
+fn list_supports_json_output() {
+    let home = TempDir::new().unwrap();
+    set(&home, "personal", "port", "8712");
+
+    pp(&home)
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"personal\""))
+        .stdout(predicate::str::contains("\"port\": 8712"));
 }
 
 #[test]
@@ -269,6 +316,34 @@ fn doctor_fails_for_incomplete_service() {
 }
 
 #[test]
+fn doctor_fix_removes_stale_runtime_state() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    configure_service(&home, "personal", dir.path().to_str().unwrap(), "true");
+    let state_dir = home.path().join(".local/state/preside/services");
+    let pid_dir = home.path().join(".local/state/preside/pids");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::create_dir_all(&pid_dir).unwrap();
+    fs::write(pid_dir.join("personal.pid"), "999999\n").unwrap();
+    fs::write(
+        state_dir.join("personal.toml"),
+        "name = \"personal\"\npid = 999999\ndir = \".\"\ncommand = \"true\"\nport = 8712\nreadiness = \"port\"\nstarted_at_unix = 1\nlog_path = \"personal.log\"\n",
+    )
+    .unwrap();
+
+    pp(&home)
+        .args(["doctor", "personal", "--fix"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "fixed: removed stale PID and state files",
+        ));
+
+    assert!(!pid_dir.join("personal.pid").exists());
+    assert!(!state_dir.join("personal.toml").exists());
+}
+
+#[test]
 fn run_injects_environment_variables() {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
@@ -303,6 +378,18 @@ fn run_injects_configured_environment_variables() {
         .assert()
         .success()
         .stdout(predicate::str::contains("development"));
+}
+
+#[test]
+fn hidden_complete_services_prints_configured_services() {
+    let home = TempDir::new().unwrap();
+    set(&home, "personal", "port", "8712");
+
+    pp(&home)
+        .args(["__complete", "services"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("personal"));
 }
 
 #[test]
@@ -380,6 +467,34 @@ fn detached_run_status_logs_and_stop_work() {
             predicate::str::contains("stopped personal")
                 .or(predicate::str::contains("sent SIGTERM to personal")),
         );
+}
+
+#[test]
+fn detached_process_readiness_does_not_require_port() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    configure_service(
+        &home,
+        "personal",
+        dir.path().to_str().unwrap(),
+        "while true; do sleep 1; done",
+    );
+    set(&home, "personal", "readiness", "process");
+
+    pp(&home)
+        .args(["run", "personal", "--detach"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("process is running"));
+
+    pp(&home)
+        .args(["logs", "personal", "--lines", "5"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[preside]"))
+        .stdout(predicate::str::contains("started pid="));
+
+    pp(&home).args(["stop", "personal"]).assert().success();
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -15,14 +15,14 @@ use nix::unistd::{setsid, Pid};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::PresidePaths;
-use crate::service::{validate_service_name, Service};
+use crate::service::{validate_service_name, Readiness, Service};
 
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const STARTUP_ALIVE_WAIT: Duration = Duration::from_millis(500);
 const PORT_WAIT_ATTEMPTS: usize = 20;
 const PORT_WAIT_INTERVAL: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ServiceStatus {
     pub pid_path: PathBuf,
     pub log_path: PathBuf,
@@ -50,6 +50,9 @@ pub struct ServiceState {
     pub domain: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    pub readiness: Readiness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_path: Option<String>,
     pub started_at_unix: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_started_at: Option<String>,
@@ -105,7 +108,7 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
         cleanup_runtime_files(&service.name, paths)?;
     }
 
-    if port_listening(service.port) {
+    if service.readiness != Readiness::Process && port_listening(service.port) {
         bail!(
             "port {} already appears to be in use; refusing to start {} detached",
             service.port,
@@ -144,6 +147,14 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
 
     let state = ServiceState::new(service, pid, &dir, &log_path);
     write_state(paths, &state)?;
+    append_lifecycle_event(
+        &log_path,
+        &format!(
+            "started pid={pid} port={} readiness={}",
+            service.port,
+            service.readiness.as_str()
+        ),
+    )?;
 
     thread::sleep(STARTUP_ALIVE_WAIT);
 
@@ -180,18 +191,21 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
         );
     }
 
-    let listening = wait_until_port_listening(service.port);
+    let ready = wait_until_ready(service);
 
     println!("started {} with PID {pid}", service.name);
     println!("log: {}", log_path.display());
 
-    if listening {
-        println!("port {} is listening", service.port);
-    } else {
-        println!(
-            "port {} is not listening yet; check `pp status {}` or `pp logs {}`",
-            service.port, service.name, service.name
-        );
+    match service.readiness {
+        Readiness::Process => println!("process is running"),
+        Readiness::Port if ready => println!("port {} is listening", service.port),
+        Readiness::Http if ready => println!("health check is passing"),
+        Readiness::Port | Readiness::Http => {
+            println!(
+                "readiness is not passing yet; check `pp status {}` or `pp logs {}`",
+                service.name, service.name
+            );
+        }
     }
 
     Ok(())
@@ -217,19 +231,23 @@ pub fn stop_service(service: &str, paths: &PresidePaths) -> Result<()> {
         );
     }
 
+    append_lifecycle_event(&status.log_path, &format!("stopping pid={pid} signal=TERM"))?;
     send_signal(pid, Signal::SIGTERM)
         .with_context(|| format!("failed to send SIGTERM to {service} with PID {pid}"))?;
 
     if wait_until_stopped(pid) {
+        append_lifecycle_event(&status.log_path, "stopped signal=TERM")?;
         cleanup_runtime_files(service, paths)?;
         println!("stopped {service}");
         return Ok(());
     }
 
+    append_lifecycle_event(&status.log_path, &format!("stopping pid={pid} signal=KILL"))?;
     send_signal(pid, Signal::SIGKILL)
         .with_context(|| format!("failed to send SIGKILL to {service} with PID {pid}"))?;
 
     if wait_until_stopped(pid) {
+        append_lifecycle_event(&status.log_path, "stopped signal=KILL")?;
         cleanup_runtime_files(service, paths)?;
         println!("force stopped {service}");
         return Ok(());
@@ -398,6 +416,8 @@ impl ServiceState {
             port: service.port,
             domain: service.domain.clone(),
             env: service.env.clone(),
+            readiness: service.readiness,
+            health_path: service.health_path.clone(),
             started_at_unix: unix_now(),
             process_started_at: process_started_at(pid as i32),
             log_path: log_path.display().to_string(),
@@ -410,6 +430,8 @@ impl ServiceState {
             && self.port == service.port
             && self.domain == service.domain
             && self.env == service.env
+            && self.readiness == service.readiness
+            && self.health_path == service.health_path
     }
 }
 
@@ -537,7 +559,7 @@ fn write_state(paths: &PresidePaths, state: &ServiceState) -> Result<()> {
         .with_context(|| format!("failed to write service state {}", path.display()))
 }
 
-fn cleanup_runtime_files(service: &str, paths: &PresidePaths) -> Result<()> {
+pub fn cleanup_runtime_files(service: &str, paths: &PresidePaths) -> Result<()> {
     remove_file_if_exists(&paths.pid_path(service))?;
     remove_file_if_exists(&paths.service_state_path(service))?;
     Ok(())
@@ -598,6 +620,56 @@ fn wait_until_port_listening(port: u16) -> bool {
     }
 
     false
+}
+
+fn wait_until_ready(service: &Service) -> bool {
+    match service.readiness {
+        Readiness::Process => true,
+        Readiness::Port => wait_until_port_listening(service.port),
+        Readiness::Http => {
+            for _ in 0..PORT_WAIT_ATTEMPTS {
+                if http_ready(service.port, service.health_path.as_deref().unwrap_or("/")) {
+                    return true;
+                }
+
+                thread::sleep(PORT_WAIT_INTERVAL);
+            }
+
+            false
+        }
+    }
+}
+
+fn http_ready(port: u16, path: &str) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) else {
+        return false;
+    };
+
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut response = [0; 16];
+    if stream.read(&mut response).is_err() {
+        return false;
+    }
+
+    let response = String::from_utf8_lossy(&response);
+    response.starts_with("HTTP/1.0 2")
+        || response.starts_with("HTTP/1.1 2")
+        || response.starts_with("HTTP/2 2")
+}
+
+fn append_lifecycle_event(path: &Path, message: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open log file {}", path.display()))?;
+    writeln!(file, "[preside] {} {message}", unix_now())?;
+    Ok(())
 }
 
 fn process_is_zombie(pid: i32) -> bool {
@@ -671,6 +743,8 @@ mod tests {
             command: "true".to_string(),
             port: 8712,
             domain: domain.map(str::to_string),
+            readiness: Readiness::Port,
+            health_path: None,
             env: BTreeMap::new(),
         }
     }

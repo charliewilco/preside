@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
+use crate::service::Readiness;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "pp",
@@ -14,7 +16,27 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Add {
+        service: String,
+        #[arg(long)]
+        dir: String,
+        #[arg(long)]
+        command: String,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        readiness: Option<Readiness>,
+        #[arg(long = "health-path")]
+        health_path: Option<String>,
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
     #[command(alias = "r")]
     Run {
         service: String,
@@ -24,6 +46,8 @@ pub enum Commands {
     #[command(alias = "i")]
     Info {
         service: String,
+        #[arg(long)]
+        json: bool,
     },
     Set {
         service: String,
@@ -43,6 +67,10 @@ pub enum Commands {
     },
     Doctor {
         service: Option<String>,
+        #[arg(long)]
+        fix: bool,
+        #[arg(long)]
+        json: bool,
     },
     Edit,
     Path {
@@ -57,6 +85,10 @@ pub enum Commands {
     },
     Completions {
         shell: Shell,
+    },
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        topic: String,
     },
     Open {
         service: String,
@@ -75,5 +107,7 @@ pub enum Commands {
     },
     Status {
         service: String,
+        #[arg(long)]
+        json: bool,
     },
 }

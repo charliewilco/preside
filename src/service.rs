@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -14,6 +15,10 @@ pub struct ServiceConfig {
     pub port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<Readiness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_path: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 }
@@ -25,7 +30,28 @@ pub struct Service {
     pub command: String,
     pub port: u16,
     pub domain: Option<String>,
+    pub readiness: Readiness,
+    pub health_path: Option<String>,
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Readiness {
+    Process,
+    #[default]
+    Port,
+    Http,
+}
+
+impl Readiness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::Port => "port",
+            Self::Http => "http",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +60,8 @@ pub enum ServiceField {
     Command,
     Port,
     Domain,
+    Readiness,
+    HealthPath,
     Env,
 }
 
@@ -44,6 +72,8 @@ impl ServiceField {
             "command" => Ok(ParsedServiceField::Scalar(Self::Command)),
             "port" => Ok(ParsedServiceField::Scalar(Self::Port)),
             "domain" => Ok(ParsedServiceField::Scalar(Self::Domain)),
+            "readiness" => Ok(ParsedServiceField::Scalar(Self::Readiness)),
+            "health_path" | "health-path" => Ok(ParsedServiceField::Scalar(Self::HealthPath)),
             field if field.starts_with("env.") => {
                 let key = field.trim_start_matches("env.");
                 validate_env_key(key)?;
@@ -82,6 +112,13 @@ impl ServiceConfig {
                 validate_domain(value)?;
                 self.domain = Some(value.to_string());
             }
+            ParsedServiceField::Scalar(ServiceField::Readiness) => {
+                self.readiness = Some(parse_readiness(value)?);
+            }
+            ParsedServiceField::Scalar(ServiceField::HealthPath) => {
+                validate_health_path(value)?;
+                self.health_path = Some(value.to_string());
+            }
             ParsedServiceField::Scalar(ServiceField::Env) => unreachable!("env requires a key"),
             ParsedServiceField::Env(key) => {
                 self.env.insert(key, value.to_string());
@@ -97,6 +134,8 @@ impl ServiceConfig {
             ParsedServiceField::Scalar(ServiceField::Command) => self.command = None,
             ParsedServiceField::Scalar(ServiceField::Port) => self.port = None,
             ParsedServiceField::Scalar(ServiceField::Domain) => self.domain = None,
+            ParsedServiceField::Scalar(ServiceField::Readiness) => self.readiness = None,
+            ParsedServiceField::Scalar(ServiceField::HealthPath) => self.health_path = None,
             ParsedServiceField::Scalar(ServiceField::Env) => unreachable!("env requires a key"),
             ParsedServiceField::Env(key) => {
                 self.env.remove(&key);
@@ -121,6 +160,8 @@ impl ServiceConfig {
                 .port
                 .ok_or_else(|| ServiceError::MissingField(name.to_string(), "port"))?,
             domain: self.domain.clone(),
+            readiness: self.readiness.unwrap_or_default(),
+            health_path: self.health_path.clone(),
             env: self.env.clone(),
         })
     }
@@ -186,6 +227,23 @@ fn validate_env_key(key: &str) -> Result<(), ServiceError> {
     Ok(())
 }
 
+fn parse_readiness(value: &str) -> Result<Readiness, ServiceError> {
+    match value {
+        "process" => Ok(Readiness::Process),
+        "port" => Ok(Readiness::Port),
+        "http" => Ok(Readiness::Http),
+        _ => Err(ServiceError::InvalidReadiness(value.to_string())),
+    }
+}
+
+fn validate_health_path(path: &str) -> Result<(), ServiceError> {
+    if path.starts_with('/') && !path.chars().any(char::is_whitespace) {
+        return Ok(());
+    }
+
+    Err(ServiceError::InvalidHealthPath(path.to_string()))
+}
+
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error("service '{0}' is not configured")]
@@ -196,7 +254,7 @@ pub enum ServiceError {
     MissingField(String, &'static str),
     #[error("invalid service name '{0}'. use letters, numbers, dots, dashes, or underscores, and start with a letter or number")]
     InvalidName(String),
-    #[error("invalid field '{0}'. expected one of: dir, command, port, domain, env.<KEY>")]
+    #[error("invalid field '{0}'. expected one of: dir, command, port, domain, readiness, health_path, env.<KEY>")]
     InvalidField(String),
     #[error("invalid port '{0}'. expected a number from 0 to 65535")]
     InvalidPort(String),
@@ -206,4 +264,10 @@ pub enum ServiceError {
     EmptyValue(&'static str),
     #[error("invalid env key '{0}'. use letters, numbers, and underscores, and start with a letter or underscore")]
     InvalidEnvKey(String),
+    #[error("invalid readiness '{0}'. expected one of: process, port, http")]
+    InvalidReadiness(String),
+    #[error("invalid health path '{0}'. expected a path starting with '/' and no whitespace")]
+    InvalidHealthPath(String),
+    #[error("invalid env assignment '{0}'. expected KEY=value")]
+    InvalidEnvAssignment(String),
 }

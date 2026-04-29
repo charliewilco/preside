@@ -5,7 +5,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::service::{validate_service_name, Service, ServiceConfig, ServiceError, ServiceField};
+use crate::service::{
+    validate_service_name, Readiness, Service, ServiceConfig, ServiceError, ServiceField,
+};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -42,6 +44,42 @@ impl Config {
         let field = ServiceField::parse(field)?;
         let service = self.services.entry(service.to_string()).or_default();
         service.set(field, value)?;
+        Ok(())
+    }
+
+    pub fn add_service(&mut self, service: AddService) -> Result<()> {
+        validate_service_name(&service.name)?;
+
+        if self.services.contains_key(&service.name) {
+            return Err(ServiceError::ServiceExists(service.name).into());
+        }
+
+        let mut config = ServiceConfig::default();
+        config.set(ServiceField::parse("dir")?, &service.dir)?;
+        config.set(ServiceField::parse("command")?, &service.command)?;
+        config.set(ServiceField::parse("port")?, &service.port.to_string())?;
+
+        if let Some(domain) = &service.domain {
+            config.set(ServiceField::parse("domain")?, domain)?;
+        }
+
+        if let Some(readiness) = service.readiness {
+            config.set(ServiceField::parse("readiness")?, readiness.as_str())?;
+        }
+
+        if let Some(health_path) = &service.health_path {
+            config.set(ServiceField::parse("health_path")?, health_path)?;
+        }
+
+        for pair in service.env {
+            let Some((key, value)) = pair.split_once('=') else {
+                return Err(ServiceError::InvalidEnvAssignment(pair).into());
+            };
+            config.set(ServiceField::parse(&format!("env.{key}"))?, value)?;
+        }
+
+        self.services.insert(service.name, config);
+
         Ok(())
     }
 
@@ -92,4 +130,16 @@ impl Config {
 
         Ok(service.validate(name)?)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct AddService {
+    pub name: String,
+    pub dir: String,
+    pub command: String,
+    pub port: u16,
+    pub domain: Option<String>,
+    pub readiness: Option<Readiness>,
+    pub health_path: Option<String>,
+    pub env: Vec<String>,
 }

@@ -495,6 +495,7 @@ dependencies = [
  "open",
  "predicates",
  "serde",
+ "serde_json",
  "shellexpand",
  "tempfile",
  "thiserror 1.0.69",
