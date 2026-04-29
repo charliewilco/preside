@@ -5,15 +5,24 @@
 Run the same checks as CI before handing over changes:
 
 ```sh
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+just check
 ```
 
-For routine local formatting:
+The underlying commands are:
 
 ```sh
-cargo fmt
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+For routine local work:
+
+```sh
+just format
+just build
+just test
+just lint
 ```
 
 ## Project Structure
