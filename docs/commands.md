@@ -8,9 +8,26 @@ Lists configured services in a human-readable table.
 
 ```sh
 pp list
+pp list --json
 ```
 
 Services are sorted by name because config is stored in a `BTreeMap`.
+
+## `pp add <service>`
+
+Creates a complete service in one command.
+
+```sh
+pp add personal --dir ~/Code/personal --command "npm run dev" --port 8712 --domain personal.local
+pp add worker --dir ~/Code/worker --command "cargo run" --port 9000 --readiness process
+```
+
+Optional flags:
+
+- `--domain <domain>`
+- `--readiness process|port|http`
+- `--health-path <path>`
+- `--env KEY=value`
 
 ## `pp set <service> <field> <value>`
 
@@ -31,6 +48,8 @@ dir
 command
 port
 domain
+readiness
+health_path
 ```
 
 Environment fields use `env.<KEY>`.
@@ -39,7 +58,7 @@ Environment fields use `env.<KEY>`.
 pp set personal env.RUST_LOG debug
 ```
 
-`dir`, `command`, and `port` are required before a service can run. `domain` and `env` are optional.
+`dir`, `command`, and `port` are required before a service can run. `domain`, `readiness`, `health_path`, and `env` are optional.
 
 ## `pp unset <service> <field>`
 
@@ -79,6 +98,7 @@ Shows configured fields and the config path in use.
 ```sh
 pp info personal
 pp i personal
+pp info personal --json
 ```
 
 ## `pp edit`
@@ -112,6 +132,8 @@ Checks all services, or one service when a name is provided.
 ```sh
 pp doctor
 pp doctor personal
+pp doctor --json
+pp doctor --fix
 ```
 
 Doctor checks:
@@ -124,6 +146,8 @@ Doctor checks:
 - occupied ports
 
 It exits successfully when no issues are found and nonzero when issues are found.
+
+`--fix` removes stale PID and runtime state files when the process is gone. It does not signal unknown live processes or edit service config.
 
 ## `pp run <service>`
 
@@ -170,9 +194,9 @@ Detached services write:
 ~/.local/state/preside/services/<service>.toml
 ```
 
-Before starting, Preside refuses to start over a live mismatched PID or an already occupied port.
+Before starting, Preside refuses to start over a live mismatched PID. For `port` and `http` readiness, it also refuses to start when the configured port is already occupied.
 
-After starting, Preside waits briefly. If the process exits immediately, the command fails and prints recent logs. If the process remains alive but the port is not listening yet, Preside reports that and leaves the service running.
+After starting, Preside waits briefly. If the process exits immediately, the command fails and prints recent logs. If the process remains alive but readiness is not passing yet, Preside reports that and leaves the service running.
 
 ## `pp status <service>`
 
@@ -180,6 +204,7 @@ Shows configured and runtime status.
 
 ```sh
 pp status personal
+pp status personal --json
 ```
 
 Status includes:
@@ -238,4 +263,10 @@ Prints a shell completion script.
 pp completions bash
 pp completions zsh
 pp completions fish
+```
+
+For dynamic zsh service-name completions, source `contrib/completions/pp.zsh`. The helper uses:
+
+```sh
+pp __complete services
 ```

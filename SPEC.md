@@ -106,6 +106,8 @@ dir = "~/Code/personal"
 command = "npm run dev"
 port = 8712
 domain = "personal.local"
+readiness = "http"
+health_path = "/healthz"
 
 [services.personal.env]
 NODE_ENV = "development"
@@ -127,6 +129,8 @@ dir: path
 command: string
 port: u16
 domain: optional string
+readiness: optional enum, one of process/port/http
+health_path: optional string
 env: optional string map
 ```
 
@@ -138,17 +142,22 @@ Required commands:
 
 ```sh
 pp list
+pp list --json
+pp add <service> --dir <dir> --command <command> --port <port>
 pp run <service>
 pp r <service>
 pp run <service> --detach
 pp r <service> -d
 pp info <service>
 pp i <service>
+pp info <service> --json
 pp set <service> <field> <value>
 pp unset <service> <field>
 pp remove <service>
 pp rename <old> <new>
 pp doctor [service]
+pp doctor [service] --fix
+pp doctor [service] --json
 pp edit
 pp path
 pp path --state
@@ -156,6 +165,7 @@ pp path --log <service>
 pp path --pid <service>
 pp path --service-state <service>
 pp completions <shell>
+pp __complete services
 pp open <service>
 pp stop <service>
 pp logs <service>
@@ -163,6 +173,7 @@ pp logs <service> --lines <n>
 pp logs <service> --follow
 pp logs <service> --clear
 pp status <service>
+pp status <service> --json
 ```
 
 ## Command behavior
@@ -178,6 +189,19 @@ Example:
 ```txt
 personal       8712   personal.local       ~/Code/personal
 burton-docs    4321   burton-docs.local    ~/Code/burton/docs
+```
+
+`--json` prints configured services as JSON.
+
+### `pp add <service>`
+
+Creates a complete service in one command.
+
+Examples:
+
+```sh
+pp add personal --dir ~/Code/personal --command "npm run dev" --port 8712 --domain personal.local
+pp add worker --dir ~/Code/worker --command "cargo run" --port 9000 --readiness process
 ```
 
 ### `pp info <service>`
@@ -210,6 +234,8 @@ dir
 command
 port
 domain
+readiness
+health_path
 env.<KEY>
 ```
 
@@ -231,6 +257,10 @@ If the port is not a valid `u16`, return a useful error.
 
 Environment keys must use letters, numbers, and underscores and start with a letter or underscore.
 
+`readiness` must be `process`, `port`, or `http`.
+
+`health_path` must start with `/` and contain no whitespace.
+
 ### `pp unset <service> <field>`
 
 Removes a configured field, including `env.<KEY>`.
@@ -245,7 +275,7 @@ Renames a configured service. It does not rename runtime state.
 
 ### `pp edit`
 
-Opens the active config path using `$VISUAL`, `$EDITOR`, or the platform opener.
+Opens the active config path using `$VISUAL`, `$EDITOR`, or the platform opener. Before opening, write a backup. After the editor exits, parse the config and report errors.
 
 ### `pp path`
 
@@ -254,6 +284,10 @@ Prints the active config path by default. Flags print state, PID, log, or runtim
 ### `pp doctor [service]`
 
 Checks config completeness, directory existence, stale PID files, mismatched live PIDs, state/config drift, and occupied ports. Exits nonzero when issues are found.
+
+`--fix` removes stale PID and runtime state files when the process is gone. It must not signal unknown live processes or edit service config.
+
+`--json` prints a machine-readable report.
 
 ### `pp run <service>`
 
@@ -333,7 +367,7 @@ Behavior:
 - write a PID file
 - write a runtime identity state file
 - fail if the process exits shortly after launch
-- warn if the process remains alive but the port is not listening yet
+- warn if the process remains alive but readiness is not passing yet
 
 State paths:
 
@@ -347,7 +381,15 @@ If a PID file already exists and the process matches Preside runtime state, show
 
 If a live PID does not match runtime state, refuse to start over it.
 
-If the configured port already appears occupied by another process, refuse to start detached.
+If readiness is `port` or `http` and the configured port already appears occupied by another process, refuse to start detached.
+
+Readiness modes:
+
+```txt
+process  process staying alive is sufficient
+port     localhost:<port> must accept TCP connections
+http     health_path on localhost:<port> must return an HTTP 2xx response
+```
 
 ### `pp stop <service>`
 
@@ -385,6 +427,8 @@ Should include:
 - whether the configured port is listening
 - recent log lines
 
+`--json` prints a machine-readable report.
+
 Example:
 
 ```txt
@@ -412,6 +456,16 @@ pp logs personal --clear
 ```
 
 Logs larger than 10 MiB rotate to `<service>.log.1` before a detached run opens the log.
+
+Preside writes lifecycle events to detached logs with a `[preside]` prefix.
+
+### `pp completions <shell>`
+
+Prints static shell completions.
+
+### `pp __complete services`
+
+Hidden helper that prints configured service names for dynamic shell completion scripts.
 
 ### `pp open <service>`
 
@@ -456,6 +510,7 @@ Use these crates unless there is a strong reason not to:
 ```toml
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"

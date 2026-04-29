@@ -28,6 +28,8 @@ dir = "~/Code/personal"
 command = "npm run dev"
 port = 8712
 domain = "personal.local"
+readiness = "http"
+health_path = "/healthz"
 
 [services.personal.env]
 NODE_ENV = "development"
@@ -54,9 +56,19 @@ Optional fields:
 ```txt
 domain
 env
+readiness
+health_path
 ```
 
 Environment variables are stored under `[services.<name>.env]` and are injected into foreground and detached runs.
+
+Readiness controls detached startup checks:
+
+- `process`: only require the process to remain alive
+- `port`: wait for `127.0.0.1:<port>` to accept TCP connections
+- `http`: wait for a successful HTTP response from `health_path` on `127.0.0.1:<port>`
+
+The default readiness mode is `port`.
 
 ## Validation
 
@@ -74,6 +86,8 @@ Service names may contain letters, numbers, dots, dashes, and underscores. They 
 Use `personal.local`, not `http://personal.local` or `personal.local:8712`.
 
 Environment keys must use letters, numbers, and underscores, and must start with a letter or underscore.
+
+`health_path` must start with `/` and cannot contain whitespace.
 
 ## Directory Expansion
 

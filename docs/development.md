@@ -25,6 +25,16 @@ just test
 just lint
 ```
 
+## Homebrew
+
+The repository includes a head-installable formula:
+
+```sh
+brew install --HEAD ./Formula/preside.rb
+```
+
+A stable tap formula needs a release URL and SHA generated from the first tagged release.
+
 ## Project Structure
 
 ```txt
@@ -75,4 +85,4 @@ git push origin v0.1.0
 
 The workflow builds release binaries on Linux and macOS, packages `pp` as `.tar.gz` artifacts, and attaches them to a GitHub Release.
 
-The current release workflow uses common third-party actions for Rust setup, Cargo caching, and GitHub Release creation. Pin action SHAs before using it in a stricter supply-chain environment.
+Workflow actions are pinned to commit SHAs. When bumping an action, update the SHA and keep the trailing comment that identifies the source tag or branch.

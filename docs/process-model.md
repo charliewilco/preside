@@ -57,16 +57,22 @@ Runtime identity is written to:
 ~/.local/state/preside/services/<service>.toml
 ```
 
-The runtime state stores the service name, PID, command, directory, port, domain, env map, start time, process start marker, and log path.
+The runtime state stores the service name, PID, command, directory, port, domain, env map, readiness mode, health path, start time, process start marker, and log path.
 
 ## Startup Checks
 
 Before detached startup, Preside refuses to start when:
 
 - a PID file points at a live process that does not match Preside state
-- the configured localhost port is already accepting connections
+- readiness is `port` or `http` and the configured localhost port is already accepting connections
 
-After spawn, Preside waits briefly. If the process exits immediately, startup fails and recent logs are shown. If the process remains alive but the configured port is not listening yet, startup succeeds with a warning.
+After spawn, Preside waits briefly. If the process exits immediately, startup fails and recent logs are shown. If the process remains alive but readiness is not passing yet, startup succeeds with a warning.
+
+Readiness modes:
+
+- `process`: the child process staying alive is enough
+- `port`: `127.0.0.1:<port>` must accept TCP connections
+- `http`: `health_path` on `127.0.0.1:<port>` must return an HTTP 2xx response
 
 ## Stopping Services
 
@@ -107,6 +113,8 @@ The listening check is a TCP connection attempt to `127.0.0.1:<port>`.
 
 It checks config completeness, directory existence, stale PID files, mismatched live PIDs, state/config drift, and occupied ports.
 
+`pp doctor --fix` removes stale PID and runtime state files for dead processes. It does not stop unknown live processes or edit service config.
+
 ## Logs
 
 `pp logs <service>` prints recent log lines.
@@ -124,6 +132,13 @@ Before opening a detached log for append, Preside rotates logs larger than 10 Mi
 ```
 
 Only one rotated file is retained.
+
+Preside also writes lifecycle events to detached logs, for example:
+
+```txt
+[preside] 1760000000 started pid=12345 port=8712 readiness=port
+[preside] 1760000100 stopped signal=TERM
+```
 
 ## Known Limits
 

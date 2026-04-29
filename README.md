@@ -14,10 +14,7 @@ PORT=8712 npm run dev
 define the service once and run it by name:
 
 ```sh
-pp set personal dir ~/Code/personal
-pp set personal command "npm run dev"
-pp set personal port 8712
-pp set personal domain personal.local
+pp add personal --dir ~/Code/personal --command "npm run dev" --port 8712 --domain personal.local
 
 pp r personal
 ```
@@ -28,6 +25,12 @@ From this repository:
 
 ```sh
 cargo install --path .
+```
+
+Homebrew users can install from the included formula as a head build:
+
+```sh
+brew install --HEAD ./Formula/preside.rb
 ```
 
 Or run during development:
@@ -44,9 +47,14 @@ pp set personal dir ~/Code/personal
 pp set personal command "npm run dev"
 pp set personal port 8712
 pp set personal domain personal.local
+pp set personal readiness port
 
 pp list
+pp list --json
 pp info personal
+pp status personal --json
+pp doctor --json
+pp doctor --fix
 pp r personal
 ```
 
@@ -71,24 +79,29 @@ pp open personal
 
 ```txt
 pp list
+pp list --json
+pp add <service> --dir <dir> --command <command> --port <port>
 pp run <service>
 pp r <service>
 pp run <service> --detach
 pp r <service> -d
 pp info <service>
 pp i <service>
+pp info <service> --json
 pp set <service> <field> <value>
 pp unset <service> <field>
 pp remove <service>
 pp rename <old> <new>
-pp doctor [service]
+pp doctor [service] [--fix] [--json]
 pp edit
 pp path [--state|--log <service>|--pid <service>|--service-state <service>]
 pp completions <shell>
+pp __complete services
 pp open <service>
 pp stop <service>
 pp logs <service> [--lines <n>|--follow|--clear]
 pp status <service>
+pp status <service> --json
 ```
 
 See [docs/commands.md](docs/commands.md) for command details.
@@ -116,6 +129,8 @@ dir = "~/Code/personal"
 command = "npm run dev"
 port = 8712
 domain = "personal.local"
+readiness = "port"
+health_path = "/healthz"
 
 [services.personal.env]
 NODE_ENV = "development"
@@ -153,14 +168,14 @@ Generate shell completions with:
 pp completions zsh > _pp
 ```
 
+For dynamic zsh service-name completions, source [contrib/completions/pp.zsh](contrib/completions/pp.zsh). It reads configured services through `pp __complete services`.
+
 ## Development
 
 Required checks:
 
 ```sh
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+just check
 ```
 
 See [docs/development.md](docs/development.md) for local and CI notes.
