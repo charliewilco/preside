@@ -80,9 +80,14 @@ pp i <service>
 pp set <service> <field> <value>
 pp unset <service> <field>
 pp remove <service>
+pp rename <old> <new>
+pp doctor [service]
+pp edit
+pp path [--state|--log <service>|--pid <service>|--service-state <service>]
+pp completions <shell>
 pp open <service>
 pp stop <service>
-pp logs <service>
+pp logs <service> [--lines <n>|--follow|--clear]
 pp status <service>
 ```
 
@@ -111,6 +116,9 @@ dir = "~/Code/personal"
 command = "npm run dev"
 port = 8712
 domain = "personal.local"
+
+[services.personal.env]
+NODE_ENV = "development"
 ```
 
 See [docs/configuration.md](docs/configuration.md) for config rules and path precedence.
@@ -123,7 +131,27 @@ Detached service state is stored under:
 ~/.local/state/preside/
 ```
 
-PID files live in `pids/`; logs live in `logs/`. See [docs/process-model.md](docs/process-model.md).
+PID files live in `pids/`, logs live in `logs/`, and runtime identity files live in `services/`. See [docs/process-model.md](docs/process-model.md).
+
+## Daily Driver Tools
+
+Use `pp doctor` when something feels off. It checks config completeness, directory existence, process identity, stale PID/state, and port conflicts.
+
+Use `pp path` to find files quickly:
+
+```sh
+pp path
+pp path --state
+pp path --log personal
+pp path --pid personal
+pp path --service-state personal
+```
+
+Generate shell completions with:
+
+```sh
+pp completions zsh > _pp
+```
 
 ## Development
 

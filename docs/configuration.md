@@ -29,6 +29,10 @@ command = "npm run dev"
 port = 8712
 domain = "personal.local"
 
+[services.personal.env]
+NODE_ENV = "development"
+RUST_LOG = "debug"
+
 [services.docs]
 dir = "$HOME/Code/docs"
 command = "pnpm dev"
@@ -49,7 +53,10 @@ Optional fields:
 
 ```txt
 domain
+env
 ```
+
+Environment variables are stored under `[services.<name>.env]` and are injected into foreground and detached runs.
 
 ## Validation
 
@@ -65,6 +72,8 @@ Service names may contain letters, numbers, dots, dashes, and underscores. They 
 - port
 
 Use `personal.local`, not `http://personal.local` or `personal.local:8712`.
+
+Environment keys must use letters, numbers, and underscores, and must start with a letter or underscore.
 
 ## Directory Expansion
 
@@ -87,4 +96,4 @@ This is valid:
 pp set personal dir ~/Code/personal
 ```
 
-Commands that require a runnable service, such as `pp run`, `pp status`, and `pp open`, require `dir`, `command`, and `port` to be present.
+Commands that require a runnable service, such as `pp run` and `pp open`, require `dir`, `command`, and `port` to be present. `pp status` and `pp doctor` can inspect incomplete services.

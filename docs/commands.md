@@ -21,9 +21,10 @@ pp set personal dir ~/Code/personal
 pp set personal command "npm run dev"
 pp set personal port 8712
 pp set personal domain personal.local
+pp set personal env.NODE_ENV development
 ```
 
-Valid fields:
+Valid scalar fields:
 
 ```txt
 dir
@@ -32,7 +33,13 @@ port
 domain
 ```
 
-`dir`, `command`, and `port` are required before a service can run. `domain` is optional.
+Environment fields use `env.<KEY>`.
+
+```sh
+pp set personal env.RUST_LOG debug
+```
+
+`dir`, `command`, and `port` are required before a service can run. `domain` and `env` are optional.
 
 ## `pp unset <service> <field>`
 
@@ -40,6 +47,7 @@ Removes one configured field from a service.
 
 ```sh
 pp unset personal domain
+pp unset personal env.NODE_ENV
 ```
 
 This can make a service incomplete. Commands that need a runnable service will report missing required fields.
@@ -54,6 +62,16 @@ pp remove personal
 
 This only edits config. It does not stop a running detached process; run `pp stop <service>` first when needed.
 
+## `pp rename <old> <new>`
+
+Renames a configured service.
+
+```sh
+pp rename personal work
+```
+
+This edits config only. Runtime state for the old name is not renamed.
+
 ## `pp info <service>`
 
 Shows configured fields and the config path in use.
@@ -62,6 +80,50 @@ Shows configured fields and the config path in use.
 pp info personal
 pp i personal
 ```
+
+## `pp edit`
+
+Opens the active config file.
+
+```sh
+pp edit
+```
+
+Preside uses `$VISUAL`, then `$EDITOR`, then falls back to the platform opener.
+
+## `pp path`
+
+Prints important Preside paths.
+
+```sh
+pp path
+pp path --state
+pp path --log personal
+pp path --pid personal
+pp path --service-state personal
+```
+
+With no flags, `pp path` prints the active config path.
+
+## `pp doctor [service]`
+
+Checks all services, or one service when a name is provided.
+
+```sh
+pp doctor
+pp doctor personal
+```
+
+Doctor checks:
+
+- config completeness
+- directory existence
+- stale PID files
+- live PIDs that do not match Preside state
+- runtime state that no longer matches config
+- occupied ports
+
+It exits successfully when no issues are found and nonzero when issues are found.
 
 ## `pp run <service>`
 
@@ -77,6 +139,7 @@ Behavior:
 - expands `~` and environment variables in `dir`
 - runs from the configured directory
 - invokes the command through `sh -c`
+- injects Preside and configured service environment variables
 - streams stdout and stderr to the current terminal
 - exits with the child process status
 
@@ -104,9 +167,12 @@ Detached services write:
 ```txt
 ~/.local/state/preside/pids/<service>.pid
 ~/.local/state/preside/logs/<service>.log
+~/.local/state/preside/services/<service>.toml
 ```
 
-If the PID file exists and the process appears alive, Preside leaves it running and reports the existing PID.
+Before starting, Preside refuses to start over a live mismatched PID or an already occupied port.
+
+After starting, Preside waits briefly. If the process exits immediately, the command fails and prints recent logs. If the process remains alive but the port is not listening yet, Preside reports that and leaves the service running.
 
 ## `pp status <service>`
 
@@ -118,22 +184,28 @@ pp status personal
 
 Status includes:
 
-- port
-- domain
+- config completeness
+- dir, command, port, domain, and URL
 - running/stopped based on PID checks
+- process identity match
+- runtime state match
 - whether localhost is accepting TCP connections on the configured port
 - PID file path
-- log path
+- state file path
+- log path and recent log lines
 
 ## `pp logs <service>`
 
-Prints the log path and the most recent log chunk.
+Prints the log path and recent log lines.
 
 ```sh
 pp logs personal
+pp logs personal --lines 200
+pp logs personal --follow
+pp logs personal --clear
 ```
 
-For v1, this is not a live tail.
+`--follow` is a simple live tail. `--clear` truncates the log.
 
 ## `pp stop <service>`
 
@@ -143,7 +215,7 @@ Stops a detached service.
 pp stop personal
 ```
 
-Preside sends `SIGTERM`, waits briefly, then sends `SIGKILL` if the process still appears alive.
+Preside only signals a live PID when it matches Preside runtime state. It sends `SIGTERM`, waits briefly, then sends `SIGKILL` if the process still appears alive.
 
 ## `pp open <service>`
 
@@ -157,3 +229,13 @@ URL selection:
 
 - `http://<domain>` when `domain` is configured
 - `http://localhost:<port>` otherwise
+
+## `pp completions <shell>`
+
+Prints a shell completion script.
+
+```sh
+pp completions bash
+pp completions zsh
+pp completions fish
+```

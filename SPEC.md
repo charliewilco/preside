@@ -36,11 +36,12 @@ Scope:
 - global TOML config
 - named service registry
 - directory + command + port + domain/alias
+- optional service-specific env vars
 - foreground and detached process launching
 - env injection
 - logs
-- PID tracking
-- status/info/list/open/stop commands
+- PID and runtime identity tracking
+- status/info/list/open/stop/doctor/path/edit commands
 
 ### v2 — Alias / proxy / TLS
 
@@ -71,9 +72,11 @@ pp set personal dir ~/Code/personal
 pp set personal command "npm run dev"
 pp set personal port 8712
 pp set personal domain personal.local
+pp set personal env.NODE_ENV development
 
 pp r personal
 pp status personal
+pp doctor personal
 pp open personal
 pp stop personal
 ```
@@ -86,6 +89,15 @@ Config path:
 ~/.config/preside/config.toml
 ```
 
+Alternate existing config paths:
+
+```txt
+~/.config/preside.toml
+~/.preside.toml
+```
+
+The first existing path is used for reads and writes. If none exist, Preside creates `~/.config/preside/config.toml`.
+
 Example config:
 
 ```toml
@@ -94,6 +106,9 @@ dir = "~/Code/personal"
 command = "npm run dev"
 port = 8712
 domain = "personal.local"
+
+[services.personal.env]
+NODE_ENV = "development"
 
 [services.burton-docs]
 dir = "~/Code/burton/docs"
@@ -112,6 +127,7 @@ dir: path
 command: string
 port: u16
 domain: optional string
+env: optional string map
 ```
 
 Use `domain`, not `alias`, in the config. It points toward the v2 proxy/TLS direction more clearly.
@@ -129,9 +145,23 @@ pp r <service> -d
 pp info <service>
 pp i <service>
 pp set <service> <field> <value>
+pp unset <service> <field>
+pp remove <service>
+pp rename <old> <new>
+pp doctor [service]
+pp edit
+pp path
+pp path --state
+pp path --log <service>
+pp path --pid <service>
+pp path --service-state <service>
+pp completions <shell>
 pp open <service>
 pp stop <service>
 pp logs <service>
+pp logs <service> --lines <n>
+pp logs <service> --follow
+pp logs <service> --clear
 pp status <service>
 ```
 
@@ -180,6 +210,7 @@ dir
 command
 port
 domain
+env.<KEY>
 ```
 
 Examples:
@@ -189,6 +220,7 @@ pp set personal dir ~/Code/personal
 pp set personal command "npm run dev"
 pp set personal port 8712
 pp set personal domain personal.local
+pp set personal env.NODE_ENV development
 ```
 
 If the service does not exist, create it.
@@ -196,6 +228,32 @@ If the service does not exist, create it.
 If the field is invalid, return a useful error.
 
 If the port is not a valid `u16`, return a useful error.
+
+Environment keys must use letters, numbers, and underscores and start with a letter or underscore.
+
+### `pp unset <service> <field>`
+
+Removes a configured field, including `env.<KEY>`.
+
+### `pp remove <service>`
+
+Removes a service from config. It does not stop a running service.
+
+### `pp rename <old> <new>`
+
+Renames a configured service. It does not rename runtime state.
+
+### `pp edit`
+
+Opens the active config path using `$VISUAL`, `$EDITOR`, or the platform opener.
+
+### `pp path`
+
+Prints the active config path by default. Flags print state, PID, log, or runtime state paths.
+
+### `pp doctor [service]`
+
+Checks config completeness, directory existence, stale PID files, mismatched live PIDs, state/config drift, and occupied ports. Exits nonzero when issues are found.
 
 ### `pp run <service>`
 
@@ -212,6 +270,7 @@ Behavior:
 - load config
 - find service
 - expand `~` in `dir`
+- expand environment variables in `dir`
 - run `command` from `dir`
 - inject environment variables
 - stream stdout/stderr to the current terminal
@@ -242,6 +301,13 @@ If domain is configured, also inject:
 PRESIDE_DOMAIN=<service.domain>
 ```
 
+Configured service env values are also injected:
+
+```toml
+[services.personal.env]
+NODE_ENV = "development"
+```
+
 Example effective command:
 
 ```sh
@@ -265,16 +331,23 @@ Behavior:
 - detach from terminal as much as practical on macOS/Unix
 - redirect stdout and stderr to a log file
 - write a PID file
-- return immediately
+- write a runtime identity state file
+- fail if the process exits shortly after launch
+- warn if the process remains alive but the port is not listening yet
 
 State paths:
 
 ```txt
 ~/.local/state/preside/pids/<service>.pid
 ~/.local/state/preside/logs/<service>.log
+~/.local/state/preside/services/<service>.toml
 ```
 
-If a PID file already exists and the process is alive, show that the service appears to already be running.
+If a PID file already exists and the process matches Preside runtime state, show that the service appears to already be running.
+
+If a live PID does not match runtime state, refuse to start over it.
+
+If the configured port already appears occupied by another process, refuse to start detached.
 
 ### `pp stop <service>`
 
@@ -283,9 +356,11 @@ Stops a detached service.
 Behavior:
 
 - read PID file
-- check whether process exists
+- read runtime state file
+- check whether process exists and matches runtime state
 - send termination signal
-- remove PID file if process is gone
+- escalate to SIGKILL if SIGTERM does not stop it
+- remove PID and runtime state files if process is gone
 
 Use Unix signals through `nix`.
 
@@ -299,10 +374,16 @@ Should include:
 
 - configured port
 - configured domain
+- URL
 - PID path
+- runtime state path
 - log path
 - whether PID file exists
 - whether process appears alive
+- whether process identity matches runtime state
+- whether runtime state matches current config
+- whether the configured port is listening
+- recent log lines
 
 Example:
 
@@ -310,7 +391,10 @@ Example:
 personal
   port: 8712
   domain: personal.local
+  url: http://personal.local
   status: running
+  listening: yes
+  identity: matches
   pid: 12345
   log: ~/.local/state/preside/logs/personal.log
 ```
@@ -319,9 +403,15 @@ personal
 
 Prints the log path and tails or displays recent log output.
 
-For v1, it is acceptable to print the last chunk of the log file.
+Supports:
 
-Do not implement a complex live tail unless simple.
+```sh
+pp logs personal --lines 100
+pp logs personal --follow
+pp logs personal --clear
+```
+
+Logs larger than 10 MiB rotate to `<service>.log.1` before a detached run opens the log.
 
 ### `pp open <service>`
 
@@ -365,6 +455,7 @@ Use these crates unless there is a strong reason not to:
 
 ```toml
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
@@ -472,6 +563,10 @@ The implementation should include tests for:
 - URL selection for `open`
 - env injection behavior where practical
 - PID/status behavior where practical
+- doctor behavior
+- detached startup failure behavior
+- log line/clear behavior
+- completion generation
 
 ## Future notes
 
