@@ -1,5 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::net::{SocketAddr, TcpStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
@@ -20,6 +21,7 @@ pub struct ServiceStatus {
     pub log_path: PathBuf,
     pub pid: Option<i32>,
     pub alive: bool,
+    pub listening: bool,
 }
 
 pub fn run_foreground(service: &Service) -> Result<ExitCode> {
@@ -116,26 +118,25 @@ pub fn stop_service(service: &str, paths: &PresidePaths) -> Result<()> {
         return Ok(());
     }
 
-    signal::kill(Pid::from_raw(-pid), Signal::SIGTERM)
-        .or_else(|_| signal::kill(Pid::from_raw(pid), Signal::SIGTERM))
+    send_signal(pid, Signal::SIGTERM)
         .with_context(|| format!("failed to send SIGTERM to {service} with PID {pid}"))?;
 
-    for _ in 0..20 {
-        if !process_alive(pid) {
-            fs::remove_file(&pid_path).with_context(|| {
-                format!(
-                    "failed to remove PID file after stop {}",
-                    pid_path.display()
-                )
-            })?;
-            println!("stopped {service}");
-            return Ok(());
-        }
-
-        thread::sleep(Duration::from_millis(100));
+    if wait_until_stopped(pid) {
+        remove_pid_file(&pid_path)?;
+        println!("stopped {service}");
+        return Ok(());
     }
 
-    println!("sent SIGTERM to {service} with PID {pid}");
+    send_signal(pid, Signal::SIGKILL)
+        .with_context(|| format!("failed to send SIGKILL to {service} with PID {pid}"))?;
+
+    if wait_until_stopped(pid) {
+        remove_pid_file(&pid_path)?;
+        println!("force stopped {service}");
+        return Ok(());
+    }
+
+    println!("{service} did not stop after SIGKILL; leaving PID file in place.");
     Ok(())
 }
 
@@ -144,12 +145,14 @@ pub fn service_status(service: &Service, paths: &PresidePaths) -> Result<Service
     let log_path = paths.log_path(&service.name);
     let pid = read_pid(&pid_path)?;
     let alive = pid.is_some_and(process_alive);
+    let listening = port_listening(service.port);
 
     Ok(ServiceStatus {
         pid_path,
         log_path,
         pid,
         alive,
+        listening,
     })
 }
 
@@ -201,7 +204,8 @@ fn service_command(service: &Service) -> Command {
 }
 
 fn expand_dir(service: &Service) -> Result<PathBuf> {
-    let expanded = shellexpand::tilde(&service.dir);
+    let expanded = shellexpand::full(&service.dir)
+        .with_context(|| format!("failed to expand directory for service '{}'", service.name))?;
     let dir = PathBuf::from(expanded.as_ref());
 
     if !dir.is_dir() {
@@ -249,11 +253,52 @@ fn read_pid(path: &PathBuf) -> Result<Option<i32>> {
 
 fn process_alive(pid: i32) -> bool {
     match signal::kill(Pid::from_raw(pid), None) {
-        Ok(()) => true,
+        Ok(()) => !process_is_zombie(pid),
         Err(Errno::EPERM) => true,
         Err(Errno::ESRCH) => false,
         Err(_) => false,
     }
+}
+
+fn send_signal(pid: i32, signal: Signal) -> nix::Result<()> {
+    signal::kill(Pid::from_raw(-pid), signal).or_else(|_| signal::kill(Pid::from_raw(pid), signal))
+}
+
+fn wait_until_stopped(pid: i32) -> bool {
+    for _ in 0..20 {
+        if !process_alive(pid) {
+            return true;
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    false
+}
+
+fn remove_pid_file(path: &PathBuf) -> Result<()> {
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove PID file after stop {}", path.display()))
+}
+
+fn process_is_zombie(pid: i32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+    else {
+        return false;
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout).contains('Z')
+}
+
+fn port_listening(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
 }
 
 #[cfg(test)]

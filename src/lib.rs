@@ -125,6 +125,10 @@ mod commands {
             if status.alive { "running" } else { "stopped" }
         );
         println!(
+            "  listening: {}",
+            if status.listening { "yes" } else { "no" }
+        );
+        println!(
             "  pid: {}",
             status
                 .pid
