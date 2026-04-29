@@ -5,29 +5,56 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use nix::errno::Errno;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{setsid, Pid};
+use serde::{Deserialize, Serialize};
 
 use crate::paths::PresidePaths;
 use crate::service::{validate_service_name, Service};
 
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
+const STARTUP_ALIVE_WAIT: Duration = Duration::from_millis(500);
+const PORT_WAIT_ATTEMPTS: usize = 20;
+const PORT_WAIT_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct ServiceStatus {
     pub pid_path: PathBuf,
     pub log_path: PathBuf,
+    pub state_path: PathBuf,
     pub pid: Option<i32>,
-    pub alive: bool,
-    pub listening: bool,
+    pub pid_file_exists: bool,
+    pub process_alive: bool,
+    pub identity_matches: bool,
+    pub state_matches_config: Option<bool>,
+    pub listening: Option<bool>,
+    pub url: Option<String>,
+    pub state: Option<ServiceState>,
+    pub log_modified_unix: Option<u64>,
+    pub recent_log_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceState {
+    pub name: String,
+    pub pid: u32,
+    pub dir: String,
+    pub command: String,
+    pub port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    pub started_at_unix: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_started_at: Option<String>,
+    pub log_path: String,
 }
 
 pub fn run_foreground(service: &Service) -> Result<ExitCode> {
-    let dir = expand_dir(service)?;
+    let dir = expand_service_dir(service)?;
     let status = service_command(service)
         .current_dir(&dir)
         .stdin(Stdio::inherit())
@@ -49,30 +76,41 @@ pub fn run_foreground(service: &Service) -> Result<ExitCode> {
 }
 
 pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
-    let dir = expand_dir(service)?;
+    let dir = expand_service_dir(service)?;
     paths.ensure_state_dirs()?;
 
-    let pid_path = paths.pid_path(&service.name);
-    let log_path = paths.log_path(&service.name);
+    let status = service_status(&service.name, Some(service), Some(service.port), paths)?;
 
-    if let Some(pid) = read_pid(&pid_path)? {
-        if process_alive(pid) {
-            println!(
-                "{} appears to already be running with PID {pid}",
-                service.name
-            );
-            return Ok(());
-        }
-
+    if status.identity_matches {
+        let pid = status.pid.expect("identity match requires a PID");
         println!(
-            "removing stale PID file for {} at {}",
-            service.name,
-            pid_path.display()
+            "{} appears to already be running with PID {pid}",
+            service.name
         );
-        fs::remove_file(&pid_path)
-            .with_context(|| format!("failed to remove stale PID file {}", pid_path.display()))?;
+        return Ok(());
     }
 
+    if status.process_alive {
+        bail!(
+            "{} has a live PID file at {}, but it does not match Preside state; refusing to start over it",
+            service.name,
+            status.pid_path.display()
+        );
+    }
+
+    if status.pid_file_exists || status.state.is_some() {
+        cleanup_runtime_files(&service.name, paths)?;
+    }
+
+    if port_listening(service.port) {
+        bail!(
+            "port {} already appears to be in use; refusing to start {} detached",
+            service.port,
+            service.name
+        );
+    }
+
+    let log_path = paths.log_path(&service.name);
     let stdout = open_log(&log_path)?;
     let stderr = stdout
         .try_clone()
@@ -97,35 +135,72 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
         .with_context(|| format!("failed to spawn detached service '{}'", service.name))?;
     let pid = child.id();
 
+    let pid_path = paths.pid_path(&service.name);
     fs::write(&pid_path, format!("{pid}\n"))
         .with_context(|| format!("failed to write PID file {}", pid_path.display()))?;
 
+    let state = ServiceState::new(service, pid, &dir, &log_path);
+    write_state(paths, &state)?;
+
+    thread::sleep(STARTUP_ALIVE_WAIT);
+
+    if !process_alive(pid as i32) {
+        let recent_logs = recent_log_lines(&log_path, 20)?;
+        cleanup_runtime_files(&service.name, paths)?;
+
+        if recent_logs.is_empty() {
+            bail!("{} exited shortly after starting", service.name);
+        }
+
+        bail!(
+            "{} exited shortly after starting\nrecent logs:\n{}",
+            service.name,
+            recent_logs.join("\n")
+        );
+    }
+
+    let listening = wait_until_port_listening(service.port);
+
     println!("started {} with PID {pid}", service.name);
     println!("log: {}", log_path.display());
+
+    if listening {
+        println!("port {} is listening", service.port);
+    } else {
+        println!(
+            "port {} is not listening yet; check `pp status {}` or `pp logs {}`",
+            service.port, service.name, service.name
+        );
+    }
 
     Ok(())
 }
 
 pub fn stop_service(service: &str, paths: &PresidePaths) -> Result<()> {
     validate_service_name(service)?;
-    let pid_path = paths.pid_path(service);
-    let Some(pid) = read_pid(&pid_path)? else {
+    let status = service_status(service, None, None, paths)?;
+    let Some(pid) = status.pid else {
         println!("{service} is not running.");
         return Ok(());
     };
 
-    if !process_alive(pid) {
-        fs::remove_file(&pid_path)
-            .with_context(|| format!("failed to remove stale PID file {}", pid_path.display()))?;
-        println!("{service} is not running. Removed stale PID file.");
+    if !status.process_alive {
+        cleanup_runtime_files(service, paths)?;
+        println!("{service} is not running. Removed stale state.");
         return Ok(());
+    }
+
+    if !status.identity_matches {
+        bail!(
+            "{service} has PID {pid}, but it does not match Preside state; refusing to signal an unknown process"
+        );
     }
 
     send_signal(pid, Signal::SIGTERM)
         .with_context(|| format!("failed to send SIGTERM to {service} with PID {pid}"))?;
 
     if wait_until_stopped(pid) {
-        remove_pid_file(&pid_path)?;
+        cleanup_runtime_files(service, paths)?;
         println!("stopped {service}");
         return Ok(());
     }
@@ -134,28 +209,56 @@ pub fn stop_service(service: &str, paths: &PresidePaths) -> Result<()> {
         .with_context(|| format!("failed to send SIGKILL to {service} with PID {pid}"))?;
 
     if wait_until_stopped(pid) {
-        remove_pid_file(&pid_path)?;
+        cleanup_runtime_files(service, paths)?;
         println!("force stopped {service}");
         return Ok(());
     }
 
-    println!("{service} did not stop after SIGKILL; leaving PID file in place.");
+    println!("{service} did not stop after SIGKILL; leaving state in place.");
     Ok(())
 }
 
-pub fn service_status(service: &Service, paths: &PresidePaths) -> Result<ServiceStatus> {
-    let pid_path = paths.pid_path(&service.name);
-    let log_path = paths.log_path(&service.name);
+pub fn service_status(
+    name: &str,
+    service: Option<&Service>,
+    port: Option<u16>,
+    paths: &PresidePaths,
+) -> Result<ServiceStatus> {
+    validate_service_name(name)?;
+
+    let pid_path = paths.pid_path(name);
+    let log_path = paths.log_path(name);
+    let state_path = paths.service_state_path(name);
     let pid = read_pid(&pid_path)?;
-    let alive = pid.is_some_and(process_alive);
-    let listening = port_listening(service.port);
+    let state = read_state(&state_path)?;
+    let process_alive = pid.is_some_and(process_alive);
+    let identity_matches = pid
+        .zip(state.as_ref())
+        .is_some_and(|(pid, state)| state_identifies_process(state, pid));
+    let state_matches_config = service.map(|service| {
+        state
+            .as_ref()
+            .is_some_and(|state| state.matches_service(service))
+    });
+    let listening = port.map(port_listening);
+    let url = service.map(service_url);
+    let log_modified_unix = file_modified_unix(&log_path)?;
+    let recent_log_lines = recent_log_lines(&log_path, 5)?;
 
     Ok(ServiceStatus {
         pid_path,
         log_path,
+        state_path,
         pid,
-        alive,
+        pid_file_exists: pid.is_some(),
+        process_alive,
+        identity_matches,
+        state_matches_config,
         listening,
+        url,
+        state,
+        log_modified_unix,
+        recent_log_lines,
     })
 }
 
@@ -192,22 +295,7 @@ pub fn service_url(service: &Service) -> String {
     }
 }
 
-fn service_command(service: &Service) -> Command {
-    let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg(&service.command)
-        .env("PORT", service.port.to_string())
-        .env("PRESIDE_NAME", &service.name);
-
-    if let Some(domain) = &service.domain {
-        command.env("PRESIDE_DOMAIN", domain);
-    }
-
-    command
-}
-
-fn expand_dir(service: &Service) -> Result<PathBuf> {
+pub fn expand_service_dir(service: &Service) -> Result<PathBuf> {
     let expanded = shellexpand::full(&service.dir)
         .with_context(|| format!("failed to expand directory for service '{}'", service.name))?;
     let dir = PathBuf::from(expanded.as_ref());
@@ -223,7 +311,75 @@ fn expand_dir(service: &Service) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn open_log(path: &PathBuf) -> Result<File> {
+pub fn port_listening(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
+}
+
+pub fn recent_log_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
+    if !path.exists() || lines == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(16 * 1024);
+    file.seek(SeekFrom::Start(start))?;
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+
+    let mut result = contents
+        .lines()
+        .rev()
+        .take(lines)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    result.reverse();
+
+    Ok(result)
+}
+
+impl ServiceState {
+    fn new(service: &Service, pid: u32, dir: &Path, log_path: &Path) -> Self {
+        Self {
+            name: service.name.clone(),
+            pid,
+            dir: dir.display().to_string(),
+            command: service.command.clone(),
+            port: service.port,
+            domain: service.domain.clone(),
+            started_at_unix: unix_now(),
+            process_started_at: process_started_at(pid as i32),
+            log_path: log_path.display().to_string(),
+        }
+    }
+
+    fn matches_service(&self, service: &Service) -> bool {
+        self.name == service.name
+            && self.command == service.command
+            && self.port == service.port
+            && self.domain == service.domain
+    }
+}
+
+fn service_command(service: &Service) -> Command {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(&service.command)
+        .env("PORT", service.port.to_string())
+        .env("PRESIDE_NAME", &service.name);
+
+    if let Some(domain) = &service.domain {
+        command.env("PRESIDE_DOMAIN", domain);
+    }
+
+    command
+}
+
+fn open_log(path: &Path) -> Result<File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create log directory {}", parent.display()))?;
@@ -272,7 +428,7 @@ fn rotated_log_path(path: &Path) -> PathBuf {
     }
 }
 
-fn read_pid(path: &PathBuf) -> Result<Option<i32>> {
+fn read_pid(path: &Path) -> Result<Option<i32>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -289,6 +445,52 @@ fn read_pid(path: &PathBuf) -> Result<Option<i32>> {
         .parse::<i32>()
         .map(Some)
         .with_context(|| format!("invalid PID in {}", path.display()))
+}
+
+fn read_state(path: &Path) -> Result<Option<ServiceState>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read service state {}", path.display()))?;
+    toml::from_str(&contents)
+        .map(Some)
+        .with_context(|| format!("failed to parse service state {}", path.display()))
+}
+
+fn write_state(paths: &PresidePaths, state: &ServiceState) -> Result<()> {
+    let path = paths.service_state_path(&state.name);
+    let contents = toml::to_string_pretty(state).context("failed to serialize service state")?;
+
+    fs::write(&path, contents)
+        .with_context(|| format!("failed to write service state {}", path.display()))
+}
+
+fn cleanup_runtime_files(service: &str, paths: &PresidePaths) -> Result<()> {
+    remove_file_if_exists(&paths.pid_path(service))?;
+    remove_file_if_exists(&paths.service_state_path(service))?;
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+fn state_identifies_process(state: &ServiceState, pid: i32) -> bool {
+    if state.pid != pid as u32 {
+        return false;
+    }
+
+    match (&state.process_started_at, process_started_at(pid)) {
+        (Some(expected), Some(actual)) => expected == &actual,
+        (None, _) => true,
+        _ => false,
+    }
 }
 
 fn process_alive(pid: i32) -> bool {
@@ -316,14 +518,22 @@ fn wait_until_stopped(pid: i32) -> bool {
     false
 }
 
-fn remove_pid_file(path: &PathBuf) -> Result<()> {
-    fs::remove_file(path)
-        .with_context(|| format!("failed to remove PID file after stop {}", path.display()))
+fn wait_until_port_listening(port: u16) -> bool {
+    for _ in 0..PORT_WAIT_ATTEMPTS {
+        if port_listening(port) {
+            return true;
+        }
+
+        thread::sleep(PORT_WAIT_INTERVAL);
+    }
+
+    false
 }
 
 fn process_is_zombie(pid: i32) -> bool {
+    let pid_arg = pid.to_string();
     let Ok(output) = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .args(["-p", &pid_arg, "-o", "stat="])
         .output()
     else {
         return false;
@@ -336,9 +546,47 @@ fn process_is_zombie(pid: i32) -> bool {
     String::from_utf8_lossy(&output.stdout).contains('Z')
 }
 
-fn port_listening(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
+fn process_started_at(pid: i32) -> Option<String> {
+    let pid_arg = pid.to_string();
+    let output = Command::new("ps")
+        .args(["-p", &pid_arg, "-o", "lstart="])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn file_modified_unix(path: &Path) -> Result<Option<u64>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let modified = fs::metadata(path)
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?
+        .modified()
+        .with_context(|| format!("failed to read modified time for {}", path.display()))?;
+
+    Ok(Some(system_time_unix(modified)))
+}
+
+fn unix_now() -> u64 {
+    system_time_unix(SystemTime::now())
+}
+
+fn system_time_unix(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -381,6 +629,18 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temp_dir.path().join("personal.log.1")).unwrap(),
             "0123456789"
+        );
+    }
+
+    #[test]
+    fn recent_log_lines_returns_the_tail() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("personal.log");
+        fs::write(&log_path, "one\ntwo\nthree\n").unwrap();
+
+        assert_eq!(
+            recent_log_lines(&log_path, 2).unwrap(),
+            vec!["two".to_string(), "three".to_string()]
         );
     }
 }

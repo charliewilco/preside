@@ -9,6 +9,7 @@ pub struct PresidePaths {
     pub state_dir: PathBuf,
     pub pid_dir: PathBuf,
     pub log_dir: PathBuf,
+    pub service_state_dir: PathBuf,
 }
 
 impl PresidePaths {
@@ -25,6 +26,7 @@ impl PresidePaths {
             config_path: config_path(home),
             pid_dir: state_dir.join("pids"),
             log_dir: state_dir.join("logs"),
+            service_state_dir: state_dir.join("services"),
             state_dir,
         }
     }
@@ -37,12 +39,22 @@ impl PresidePaths {
         self.log_dir.join(format!("{service}.log"))
     }
 
+    pub fn service_state_path(&self, service: &str) -> PathBuf {
+        self.service_state_dir.join(format!("{service}.toml"))
+    }
+
     pub fn ensure_state_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.pid_dir).with_context(|| {
             format!("failed to create PID directory {}", self.pid_dir.display())
         })?;
         std::fs::create_dir_all(&self.log_dir).with_context(|| {
             format!("failed to create log directory {}", self.log_dir.display())
+        })?;
+        std::fs::create_dir_all(&self.service_state_dir).with_context(|| {
+            format!(
+                "failed to create service state directory {}",
+                self.service_state_dir.display()
+            )
         })?;
         Ok(())
     }
