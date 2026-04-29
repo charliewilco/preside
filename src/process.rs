@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -14,6 +14,8 @@ use nix::unistd::{setsid, Pid};
 
 use crate::paths::PresidePaths;
 use crate::service::{validate_service_name, Service};
+
+const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ServiceStatus {
@@ -227,11 +229,47 @@ fn open_log(path: &PathBuf) -> Result<File> {
             .with_context(|| format!("failed to create log directory {}", parent.display()))?;
     }
 
+    rotate_log_if_needed(path, LOG_ROTATE_BYTES)?;
+
     OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .with_context(|| format!("failed to open log file {}", path.display()))
+}
+
+fn rotate_log_if_needed(path: &Path, max_bytes: u64) -> Result<()> {
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(());
+    };
+
+    if metadata.len() <= max_bytes {
+        return Ok(());
+    }
+
+    let backup = rotated_log_path(path);
+
+    if backup.exists() {
+        fs::remove_file(&backup)
+            .with_context(|| format!("failed to remove old log backup {}", backup.display()))?;
+    }
+
+    fs::rename(path, &backup).with_context(|| {
+        format!(
+            "failed to rotate log {} to {}",
+            path.display(),
+            backup.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn rotated_log_path(path: &Path) -> PathBuf {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) => path.with_extension(format!("{extension}.1")),
+        None => path.with_extension("1"),
+    }
 }
 
 fn read_pid(path: &PathBuf) -> Result<Option<i32>> {
@@ -306,6 +344,7 @@ fn port_listening(port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     fn service(domain: Option<&str>) -> Service {
         Service {
@@ -328,5 +367,20 @@ mod tests {
     #[test]
     fn url_uses_localhost_without_domain() {
         assert_eq!(service_url(&service(None)), "http://localhost:8712");
+    }
+
+    #[test]
+    fn rotates_log_when_it_exceeds_limit() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("personal.log");
+        fs::write(&log_path, "0123456789").unwrap();
+
+        rotate_log_if_needed(&log_path, 5).unwrap();
+
+        assert!(!log_path.exists());
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("personal.log.1")).unwrap(),
+            "0123456789"
+        );
     }
 }
