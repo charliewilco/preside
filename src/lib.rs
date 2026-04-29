@@ -59,6 +59,7 @@ pub fn run() -> Result<ExitCode> {
             println!("removed {service}");
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Doctor { service } => commands::doctor(&config, &paths, service.as_deref()),
         Commands::Open { service } => {
             let service = config.require_service(&service)?;
             let url = process::service_url(&service);
@@ -82,12 +83,14 @@ pub fn run() -> Result<ExitCode> {
 }
 
 mod commands {
+    use std::process::ExitCode;
+
     use anyhow::Result;
 
     use crate::config::Config;
     use crate::paths::PresidePaths;
     use crate::process;
-    use crate::service::validate_service_name;
+    use crate::service::{validate_service_name, ServiceConfig};
 
     pub fn list(config: &Config) {
         if config.services.is_empty() {
@@ -220,7 +223,112 @@ mod commands {
         Ok(())
     }
 
-    fn missing_fields(service: &crate::service::ServiceConfig) -> Vec<&'static str> {
+    pub fn doctor(
+        config: &Config,
+        paths: &PresidePaths,
+        service: Option<&str>,
+    ) -> Result<ExitCode> {
+        println!("config: {}", paths.config_path.display());
+        println!("state: {}", paths.state_dir.display());
+
+        if config.services.is_empty() {
+            println!("No services configured.");
+            return Ok(ExitCode::from(1));
+        }
+
+        let mut issues = 0;
+
+        for (name, service_config) in &config.services {
+            if service.is_some_and(|selected| selected != name) {
+                continue;
+            }
+
+            println!();
+            println!("{name}");
+
+            match validate_service_name(name) {
+                Ok(()) => {}
+                Err(error) => {
+                    issues += 1;
+                    println!("  error: {error}");
+                    continue;
+                }
+            }
+
+            let missing_fields = missing_fields(service_config);
+            if missing_fields.is_empty() {
+                println!("  config: ok");
+            } else {
+                issues += missing_fields.len();
+                println!("  config: missing {}", missing_fields.join(", "));
+            }
+
+            let service = service_config.validate(name).ok();
+
+            if let Some(service) = &service {
+                match process::expand_service_dir(service) {
+                    Ok(dir) => println!("  dir: ok ({})", dir.display()),
+                    Err(error) => {
+                        issues += 1;
+                        println!("  dir: {error:#}");
+                    }
+                }
+            }
+
+            let status =
+                process::service_status(name, service.as_ref(), service_config.port, paths)?;
+
+            if status.pid_file_exists && !status.process_alive {
+                issues += 1;
+                println!("  process: stale PID file");
+            } else if status.process_alive && !status.identity_matches {
+                issues += 1;
+                println!("  process: live PID does not match Preside state");
+            } else if status.identity_matches {
+                println!("  process: running");
+            } else {
+                println!("  process: stopped");
+            }
+
+            if status.state.is_some() && status.state_matches_config == Some(false) {
+                issues += 1;
+                println!("  state: does not match current config");
+            } else if status.state.is_some() {
+                println!("  state: ok");
+            } else {
+                println!("  state: none");
+            }
+
+            match status.listening {
+                Some(true) if status.identity_matches => println!("  port: listening"),
+                Some(true) => {
+                    issues += 1;
+                    println!("  port: in use by another process or unknown state");
+                }
+                Some(false) => println!("  port: not listening"),
+                None => println!("  port: not configured"),
+            }
+        }
+
+        if let Some(service) = service {
+            if !config.services.contains_key(service) {
+                return Err(
+                    crate::service::ServiceError::MissingService(service.to_string()).into(),
+                );
+            }
+        }
+
+        println!();
+        if issues == 0 {
+            println!("Doctor found no issues.");
+            Ok(ExitCode::SUCCESS)
+        } else {
+            println!("Doctor found {issues} issue(s).");
+            Ok(ExitCode::from(1))
+        }
+    }
+
+    fn missing_fields(service: &ServiceConfig) -> Vec<&'static str> {
         let mut fields = Vec::new();
 
         if service.dir.is_none() {

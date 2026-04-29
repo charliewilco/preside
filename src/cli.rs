@@ -36,6 +36,9 @@ pub enum Commands {
     Remove {
         service: String,
     },
+    Doctor {
+        service: Option<String>,
+    },
     Open {
         service: String,
     },

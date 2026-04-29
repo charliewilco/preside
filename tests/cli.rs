@@ -193,6 +193,32 @@ fn remove_deletes_a_service() {
 }
 
 #[test]
+fn doctor_succeeds_for_complete_stopped_service() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    configure_service(&home, "personal", dir.path().to_str().unwrap(), "true");
+
+    pp(&home)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Doctor found no issues."));
+}
+
+#[test]
+fn doctor_fails_for_incomplete_service() {
+    let home = TempDir::new().unwrap();
+    set(&home, "personal", "port", "8712");
+
+    pp(&home)
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("config: missing dir, command"))
+        .stdout(predicate::str::contains("Doctor found 2 issue(s)."));
+}
+
+#[test]
 fn run_injects_environment_variables() {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
