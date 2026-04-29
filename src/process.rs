@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpStream};
@@ -47,6 +48,8 @@ pub struct ServiceState {
     pub port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     pub started_at_unix: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_started_at: Option<String>,
@@ -130,7 +133,7 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
         });
     }
 
-    let child = command
+    let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn detached service '{}'", service.name))?;
     let pid = child.id();
@@ -143,6 +146,24 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
     write_state(paths, &state)?;
 
     thread::sleep(STARTUP_ALIVE_WAIT);
+
+    if let Some(status) = child.try_wait()? {
+        let recent_logs = recent_log_lines(&log_path, 20)?;
+        cleanup_runtime_files(&service.name, paths)?;
+
+        if recent_logs.is_empty() {
+            bail!(
+                "{} exited shortly after starting with status {status}",
+                service.name
+            );
+        }
+
+        bail!(
+            "{} exited shortly after starting with status {status}\nrecent logs:\n{}",
+            service.name,
+            recent_logs.join("\n")
+        );
+    }
 
     if !process_alive(pid as i32) {
         let recent_logs = recent_log_lines(&log_path, 20)?;
@@ -262,29 +283,55 @@ pub fn service_status(
     })
 }
 
-pub fn print_logs(service: &str, paths: &PresidePaths) -> Result<()> {
+pub fn print_logs(
+    service: &str,
+    paths: &PresidePaths,
+    lines: usize,
+    follow: bool,
+    clear: bool,
+) -> Result<()> {
     validate_service_name(service)?;
     let log_path = paths.log_path(service);
+
+    if clear {
+        clear_log(&log_path)?;
+        println!("cleared {}", log_path.display());
+
+        if !follow {
+            return Ok(());
+        }
+    }
+
     println!("log: {}", log_path.display());
 
     if !log_path.exists() {
-        println!("No log file found.");
-        return Ok(());
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+        }
+
+        File::create(&log_path)
+            .with_context(|| format!("failed to create log file {}", log_path.display()))?;
     }
 
-    let mut file = File::open(&log_path)
-        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
-    let len = file.metadata()?.len();
-    let start = len.saturating_sub(8 * 1024);
-    file.seek(SeekFrom::Start(start))?;
-
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-
-    if !contents.is_empty() {
-        print!("{contents}");
+    for line in recent_log_lines(&log_path, lines)? {
+        println!("{line}");
     }
 
+    if follow {
+        follow_log(&log_path)?;
+    }
+
+    Ok(())
+}
+
+pub fn clear_log(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+    }
+
+    File::create(path).with_context(|| format!("failed to clear log file {}", path.display()))?;
     Ok(())
 }
 
@@ -350,6 +397,7 @@ impl ServiceState {
             command: service.command.clone(),
             port: service.port,
             domain: service.domain.clone(),
+            env: service.env.clone(),
             started_at_unix: unix_now(),
             process_started_at: process_started_at(pid as i32),
             log_path: log_path.display().to_string(),
@@ -361,6 +409,7 @@ impl ServiceState {
             && self.command == service.command
             && self.port == service.port
             && self.domain == service.domain
+            && self.env == service.env
     }
 }
 
@@ -374,6 +423,10 @@ fn service_command(service: &Service) -> Command {
 
     if let Some(domain) = &service.domain {
         command.env("PRESIDE_DOMAIN", domain);
+    }
+
+    for (key, value) in &service.env {
+        command.env(key, value);
     }
 
     command
@@ -392,6 +445,23 @@ fn open_log(path: &Path) -> Result<File> {
         .append(true)
         .open(path)
         .with_context(|| format!("failed to open log file {}", path.display()))
+}
+
+fn follow_log(path: &Path) -> Result<()> {
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
+    file.seek(SeekFrom::End(0))?;
+
+    loop {
+        let mut contents = String::new();
+        let bytes = file.read_to_string(&mut contents)?;
+
+        if bytes > 0 {
+            print!("{contents}");
+        } else {
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
 }
 
 fn rotate_log_if_needed(path: &Path, max_bytes: u64) -> Result<()> {
@@ -601,6 +671,7 @@ mod tests {
             command: "true".to_string(),
             port: 8712,
             domain: domain.map(str::to_string),
+            env: BTreeMap::new(),
         }
     }
 

@@ -1,4 +1,5 @@
 use std::fs;
+use std::net::TcpListener;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -193,6 +194,55 @@ fn remove_deletes_a_service() {
 }
 
 #[test]
+fn rename_moves_a_service() {
+    let home = TempDir::new().unwrap();
+    set(&home, "personal", "port", "8712");
+
+    pp(&home)
+        .args(["rename", "personal", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("renamed personal to work"));
+
+    pp(&home)
+        .args(["info", "personal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "service 'personal' is not configured",
+        ));
+
+    pp(&home)
+        .args(["info", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("port: 8712"));
+}
+
+#[test]
+fn path_prints_config_and_state_paths() {
+    let home = TempDir::new().unwrap();
+
+    pp(&home)
+        .arg("path")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".config/preside/config.toml"));
+
+    pp(&home)
+        .args(["path", "--log", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("logs/personal.log"));
+
+    pp(&home)
+        .args(["path", "--service-state", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("services/personal.toml"));
+}
+
+#[test]
 fn doctor_succeeds_for_complete_stopped_service() {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
@@ -237,6 +287,61 @@ fn run_injects_environment_variables() {
 }
 
 #[test]
+fn run_injects_configured_environment_variables() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    configure_service(
+        &home,
+        "personal",
+        dir.path().to_str().unwrap(),
+        "printf '%s' \"$NODE_ENV\"",
+    );
+    set(&home, "personal", "env.NODE_ENV", "development");
+
+    pp(&home)
+        .args(["r", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("development"));
+}
+
+#[test]
+fn logs_support_lines_and_clear() {
+    let home = TempDir::new().unwrap();
+    let log_dir = home.path().join(".local/state/preside/logs");
+    fs::create_dir_all(&log_dir).unwrap();
+    let log_path = log_dir.join("personal.log");
+    fs::write(&log_path, "one\ntwo\nthree\n").unwrap();
+
+    pp(&home)
+        .args(["logs", "personal", "--lines", "2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("two"))
+        .stdout(predicate::str::contains("three"))
+        .stdout(predicate::str::contains("one").not());
+
+    pp(&home)
+        .args(["logs", "personal", "--clear"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleared"));
+
+    assert_eq!(fs::read_to_string(&log_path).unwrap(), "");
+}
+
+#[test]
+fn completions_print_shell_completion_script() {
+    let home = TempDir::new().unwrap();
+
+    pp(&home)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_pp"));
+}
+
+#[test]
 fn detached_run_status_logs_and_stop_work() {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
@@ -275,4 +380,44 @@ fn detached_run_status_logs_and_stop_work() {
             predicate::str::contains("stopped personal")
                 .or(predicate::str::contains("sent SIGTERM to personal")),
         );
+}
+
+#[test]
+fn detached_run_fails_when_command_exits_immediately() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    configure_service(
+        &home,
+        "personal",
+        dir.path().to_str().unwrap(),
+        "printf 'boom\\n'; exit 7",
+    );
+
+    pp(&home)
+        .args(["run", "personal", "--detach"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "personal exited shortly after starting",
+        ));
+}
+
+#[test]
+fn detached_run_refuses_occupied_port() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
+        return;
+    };
+    let port = listener.local_addr().unwrap().port().to_string();
+
+    set(&home, "personal", "dir", dir.path().to_str().unwrap());
+    set(&home, "personal", "command", "while true; do sleep 1; done");
+    set(&home, "personal", "port", &port);
+
+    pp(&home)
+        .args(["run", "personal", "--detach"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already appears to be in use"));
 }

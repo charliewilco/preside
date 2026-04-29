@@ -7,7 +7,8 @@ pub mod service;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::generate;
 
 use crate::cli::{Cli, Commands};
 use crate::config::Config;
@@ -59,7 +60,37 @@ pub fn run() -> Result<ExitCode> {
             println!("removed {service}");
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Rename { old, new } => {
+            config.rename_service(&old, &new)?;
+            config.save(&paths.config_path)?;
+            println!("renamed {old} to {new}");
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Doctor { service } => commands::doctor(&config, &paths, service.as_deref()),
+        Commands::Edit => {
+            commands::edit(&paths)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Path {
+            state,
+            log,
+            pid,
+            service_state,
+        } => {
+            commands::path(
+                &paths,
+                state,
+                log.as_deref(),
+                pid.as_deref(),
+                service_state.as_deref(),
+            )?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Completions { shell } => {
+            let mut command = Cli::command();
+            generate(shell, &mut command, "pp", &mut std::io::stdout());
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Open { service } => {
             let service = config.require_service(&service)?;
             let url = process::service_url(&service);
@@ -71,8 +102,13 @@ pub fn run() -> Result<ExitCode> {
             process::stop_service(&service, &paths)?;
             Ok(ExitCode::SUCCESS)
         }
-        Commands::Logs { service } => {
-            process::print_logs(&service, &paths)?;
+        Commands::Logs {
+            service,
+            lines,
+            follow,
+            clear,
+        } => {
+            process::print_logs(&service, &paths, lines, follow, clear)?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Status { service } => {
@@ -83,6 +119,8 @@ pub fn run() -> Result<ExitCode> {
 }
 
 mod commands {
+    use std::fs;
+    use std::process::Command;
     use std::process::ExitCode;
 
     use anyhow::Result;
@@ -326,6 +364,63 @@ mod commands {
             println!("Doctor found {issues} issue(s).");
             Ok(ExitCode::from(1))
         }
+    }
+
+    pub fn edit(paths: &PresidePaths) -> Result<()> {
+        if let Some(parent) = paths.config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        if !paths.config_path.exists() {
+            fs::write(&paths.config_path, "")?;
+        }
+
+        if let Some(editor) = std::env::var_os("VISUAL").or_else(|| std::env::var_os("EDITOR")) {
+            let status = Command::new(editor).arg(&paths.config_path).status()?;
+
+            if !status.success() {
+                anyhow::bail!("editor exited with status {status}");
+            }
+
+            return Ok(());
+        }
+
+        open::that(&paths.config_path)?;
+        Ok(())
+    }
+
+    pub fn path(
+        paths: &PresidePaths,
+        state: bool,
+        log: Option<&str>,
+        pid: Option<&str>,
+        service_state: Option<&str>,
+    ) -> Result<()> {
+        let selected = [state, log.is_some(), pid.is_some(), service_state.is_some()]
+            .into_iter()
+            .filter(|selected| *selected)
+            .count();
+
+        if selected > 1 {
+            anyhow::bail!("choose only one path option");
+        }
+
+        if state {
+            println!("{}", paths.state_dir.display());
+        } else if let Some(service) = log {
+            validate_service_name(service)?;
+            println!("{}", paths.log_path(service).display());
+        } else if let Some(service) = pid {
+            validate_service_name(service)?;
+            println!("{}", paths.pid_path(service).display());
+        } else if let Some(service) = service_state {
+            validate_service_name(service)?;
+            println!("{}", paths.service_state_path(service).display());
+        } else {
+            println!("{}", paths.config_path.display());
+        }
+
+        Ok(())
     }
 
     fn missing_fields(service: &ServiceConfig) -> Vec<&'static str> {

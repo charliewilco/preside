@@ -66,6 +66,23 @@ impl Config {
         Ok(())
     }
 
+    pub fn rename_service(&mut self, old: &str, new: &str) -> Result<()> {
+        validate_service_name(old)?;
+        validate_service_name(new)?;
+
+        if self.services.contains_key(new) {
+            return Err(ServiceError::ServiceExists(new.to_string()).into());
+        }
+
+        let service = self
+            .services
+            .remove(old)
+            .ok_or_else(|| ServiceError::MissingService(old.to_string()))?;
+        self.services.insert(new.to_string(), service);
+
+        Ok(())
+    }
+
     pub fn require_service(&self, name: &str) -> Result<Service> {
         validate_service_name(name)?;
         let service = self
