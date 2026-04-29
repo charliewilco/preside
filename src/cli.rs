@@ -29,6 +29,13 @@ pub enum Commands {
         field: String,
         value: String,
     },
+    Unset {
+        service: String,
+        field: String,
+    },
+    Remove {
+        service: String,
+    },
     Open {
         service: String,
     },

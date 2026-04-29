@@ -13,7 +13,7 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::{setsid, Pid};
 
 use crate::paths::PresidePaths;
-use crate::service::Service;
+use crate::service::{validate_service_name, Service};
 
 #[derive(Debug, Clone)]
 pub struct ServiceStatus {
@@ -105,6 +105,7 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
 }
 
 pub fn stop_service(service: &str, paths: &PresidePaths) -> Result<()> {
+    validate_service_name(service)?;
     let pid_path = paths.pid_path(service);
     let Some(pid) = read_pid(&pid_path)? else {
         println!("{service} is not running.");
@@ -157,6 +158,7 @@ pub fn service_status(service: &Service, paths: &PresidePaths) -> Result<Service
 }
 
 pub fn print_logs(service: &str, paths: &PresidePaths) -> Result<()> {
+    validate_service_name(service)?;
     let log_path = paths.log_path(service);
     println!("log: {}", log_path.display());
 

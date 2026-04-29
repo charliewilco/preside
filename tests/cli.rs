@@ -130,6 +130,69 @@ fn invalid_port_returns_useful_error() {
 }
 
 #[test]
+fn invalid_service_name_returns_useful_error() {
+    let home = TempDir::new().unwrap();
+
+    pp(&home)
+        .args(["set", "../personal", "port", "8712"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "invalid service name '../personal'",
+        ));
+}
+
+#[test]
+fn invalid_domain_returns_useful_error() {
+    let home = TempDir::new().unwrap();
+
+    pp(&home)
+        .args(["set", "personal", "domain", "http://personal.local"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "invalid domain 'http://personal.local'",
+        ));
+}
+
+#[test]
+fn unset_removes_a_service_field() {
+    let home = TempDir::new().unwrap();
+    set(&home, "personal", "port", "8712");
+    set(&home, "personal", "domain", "personal.local");
+
+    pp(&home)
+        .args(["unset", "personal", "domain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unset personal.domain"));
+
+    let config = fs::read_to_string(home.path().join(".config/preside/config.toml")).unwrap();
+    assert!(config.contains("port = 8712"));
+    assert!(!config.contains("domain"));
+}
+
+#[test]
+fn remove_deletes_a_service() {
+    let home = TempDir::new().unwrap();
+    set(&home, "personal", "port", "8712");
+
+    pp(&home)
+        .args(["remove", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed personal"));
+
+    pp(&home)
+        .args(["info", "personal"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "service 'personal' is not configured",
+        ));
+}
+
+#[test]
 fn run_injects_environment_variables() {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();

@@ -47,6 +47,18 @@ pub fn run() -> Result<ExitCode> {
             println!("set {service}.{field}");
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Unset { service, field } => {
+            config.unset_field(&service, &field)?;
+            config.save(&paths.config_path)?;
+            println!("unset {service}.{field}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Remove { service } => {
+            config.remove_service(&service)?;
+            config.save(&paths.config_path)?;
+            println!("removed {service}");
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Open { service } => {
             let service = config.require_service(&service)?;
             let url = process::service_url(&service);
