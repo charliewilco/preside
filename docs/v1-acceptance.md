@@ -18,6 +18,9 @@ Preside v1 is complete when a user can install the macOS app, add either a stati
 
 - Local upgrade regression: `CARGO_PROFILE_RELEASE_STRIP=none ./scripts/test-macos-upgrade.sh 0658a87` passed from the prior app to the 80ec303-based bundle. Static and command sites kept identical configuration bytes, PIDs, verified identities, and working HTTP responses across replacement. The new CLI stopped both sites and ports closed. Current CLI SHA-256 was `8999ff8f985510fda4c48042f72e02d4830d4d729c8893b3d1be208de086023c`. The unstripped build override worked around this host's linker rejection of a stripped proc-macro dylib; no production code workaround was applied. The check uses preflight-verified isolated HOME/XDG paths and a minimal PATH. GUI preferences and signed/quarantined upgrade behavior are not covered.
 
+- Native preference upgrade: saved a temporary PATH prefix in the prior extracted app, quit it, replaced its bundle at the same installation path with the current app, and verified that Settings retained the prefix. Restored and verified the original PATH afterward. The bundled-CLI selection remained empty across replacement. This is local preference continuity, not signed/quarantined upgrade acceptance.
+- Keyboard/accessibility inspection: Command-comma opened Settings; Command-N opened Add Site; Tab moved from Name to Project folder; Escape cancelled the sheet. The native tool lookup resolved `/usr/bin/true`. VoiceOver was temporarily enabled and restored to its original off state, but the UI-control surface did not establish spoken output or VoiceOver navigation. That acceptance gate remains open.
+
 ## Remaining release gates
 
 - [x] Gate service execution on durable runtime publication; test controller death at launch handoff boundaries.
@@ -32,7 +35,8 @@ Preside v1 is complete when a user can install the macOS app, add either a stati
 - [ ] Run distribution signing, notarization, stapling, and Gatekeeper assessment with real release credentials.
 - [ ] Download/install the actual release on a clean Apple Silicon Mac without developer tools, including the minimum supported macOS version.
 - [x] Verify local app replacement preserves site configuration and control of running static/command sites.
-- [ ] Verify GUI preferences and signed/quarantined upgrades of the distributed app.
+- [x] Verify local PATH preference continuity and unchanged bundled-CLI selection across app replacement.
+- [ ] Verify signed/quarantined upgrades of the distributed app.
 - [ ] Confirm hosted CI for the final release commit, then publish the versioned app and CLI artifacts.
 
 The app uses manual downloads from GitHub Releases for updates. Automatic DNS/HTTPS, a daemon/supervisor, automatic server startup, Docker management, and cloud sync are outside this v1 scope. SPA fallback and launching the app at login remain optional enhancements.
