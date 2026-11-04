@@ -11,7 +11,7 @@ just macos-build
 open dist/Preside.app
 ```
 
-The build creates an ad-hoc signed app containing both the Swift executable and a release build of `pp`. It builds for the current Mac's architecture. You can move the app to Applications. Distribution signing, notarization, universal binaries, and automatic updates are not configured.
+The build creates an ad-hoc signed app containing both the Swift executable and a release build of `pp`. It builds for the current Mac's architecture. You can move the app to Applications. Signed/notarized distribution packaging is supported when release credentials are configured; see [releasing.md](releasing.md). Public releases target Apple Silicon. Updates use the GitHub Releases download linked in Settings. Automatic updates and universal binaries are not configured.
 
 Open `macos/Package.swift` in Xcode to develop the interface and use its SwiftUI previews. When running the package directly, install `pp` or select a built executable in Settings. The packaged app uses its bundled `pp` by default.
 
@@ -20,6 +20,7 @@ Open `macos/Package.swift` in Xcode to develop the interface and use its SwiftUI
 - Browse and search configured services.
 - Start detached services, stop verified Preside processes, and open configured URLs.
 - Inspect configuration, PID, TCP listening status, and the five most recent log lines; reveal the full log in Finder.
+- Edit site settings, restart to apply changes, and rename or remove stopped sites. Removing a site keeps project files.
 - Run diagnostics without automatically applying repairs.
 - Add sites directly from the menu bar or main window. Choose **Static folder** to serve a directory with the built-in server, or **Server command** to launch a development server such as `npm run dev`.
 - Configure a port and optional domain for either type; command sites also support readiness checks and environment variables.
@@ -40,7 +41,7 @@ Settings can override the `pp` executable and the PATH used by service commands.
 
 Finder does not load interactive shell configuration. For version managers such as nvm, specify the directory containing your chosen Node executable in PATH, or use an absolute executable path in the service command. The app does not run shell startup files automatically.
 
-Use More > Reveal Configuration in Finder to locate the existing TOML file for edits. Full service editing, removal, and renaming are intentionally not exposed yet: the current CLI does not provide atomic multi-field updates, and simultaneous app/terminal config changes can overwrite each other. Avoid simultaneous configuration changes or starts from multiple clients.
+Use More > Reveal Configuration in Finder to locate the existing TOML file for edits. Use Manage Site in the detail view to edit, rename, or remove a site. Editing saves all settings in one transaction; if another client changed the site while its editor was open, saving is rejected so you can reopen with fresh settings. Running sites can be edited and explicitly restarted. Rename and Remove require the site to be stopped. The CLI and app share a cross-process mutation lock, and configuration/runtime files are replaced atomically. Direct edits from unrelated text editors do not take that lock.
 
 Custom domains require external DNS/proxy setup, just as they do in the CLI.
 

@@ -206,6 +206,8 @@ See [docs/development.md](docs/development.md) for local and CI notes.
 
 ## Current Scope
 
+See [v1 acceptance](docs/v1-acceptance.md) for verified behavior and outstanding release gates.
+
 This is v1: named local services, config, foreground and detached process management, PID tracking, logs, status, and open/stop helpers.
 
 A native macOS app now exposes service browsing, start/stop, logs, diagnostics, and service creation. Preside does not currently implement a daemon, launchd integration, reverse proxying, TLS, or `/etc/hosts` edits.

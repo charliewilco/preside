@@ -23,7 +23,7 @@ jobs:
             os: ubuntu-latest
             archive: pp-linux-x86_64.tar.gz
           - name: macos-aarch64
-            os: macos-latest
+            os: macos-15
             archive: pp-macos-aarch64.tar.gz
 
     steps:
@@ -37,7 +37,7 @@ jobs:
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package
         run: tar -czf "${{ matrix.archive }}" -C target/release pp
@@ -49,10 +49,82 @@ jobs:
           path: ${{ matrix.archive }}
           if-no-files-found: error
 
+  macos-app:
+    name: Build signed macOS app
+    runs-on: macos-15
+    environment: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Validate release version and architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "$(uname -m)" = arm64
+
+      - name: Prepare distribution credentials
+        shell: bash
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          : "${CERTIFICATE_BASE64:?Missing MACOS_CERTIFICATE_BASE64}"
+          : "${CERTIFICATE_PASSWORD:?Missing MACOS_CERTIFICATE_PASSWORD}"
+          : "${API_KEY_BASE64:?Missing APPLE_API_KEY_BASE64}"
+          : "${API_KEY_ID:?Missing APPLE_API_KEY_ID}"
+          : "${API_ISSUER:?Missing APPLE_API_ISSUER}"
+          : "${SIGNING_IDENTITY:?Missing MACOS_SIGNING_IDENTITY}"
+          keychain="$RUNNER_TEMP/preside-release.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/preside-signing.p12"
+          printf '%s' "$API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/preside-notary.p8"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/preside-signing.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          xcrun notarytool store-credentials preside-release --keychain "$keychain" --key "$RUNNER_TEMP/preside-notary.p8" --key-id "$API_KEY_ID" --issuer "$API_ISSUER"
+          printf 'PRESIDE_SIGNING_KEYCHAIN=%s\nPRESIDE_NOTARY_PROFILE=preside-release\n' "$keychain" >> "$GITHUB_ENV"
+
+      - name: Package signed and notarized app
+        env:
+          PRESIDE_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          PRESIDE_BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/package-macos.sh --distribution
+
+      - name: Upload app artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Preside-macos-arm64
+          path: |
+            dist/Preside-*-macos-arm64.zip
+            dist/Preside-*-macos-arm64.dmg
+            dist/Preside-*-macos-arm64.sha256
+          if-no-files-found: error
+
+      - name: Remove distribution credentials
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/preside-release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/preside-signing.p12" "$RUNNER_TEMP/preside-notary.p8"
+
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, macos-app]
 
     steps:
       - name: Download artifacts
@@ -64,4 +136,9 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.dmg
+            dist/*.sha256
+          fail_on_unmatched_files: true

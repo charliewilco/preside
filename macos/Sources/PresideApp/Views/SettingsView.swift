@@ -6,6 +6,20 @@ struct SettingsView: View {
 
   var body: some View {
     Form {
+      Section("About Preside") {
+        LabeledContent(
+          "Version",
+          value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "Development")
+        Link(
+          "Download Updates…",
+          destination: URL(string: "https://github.com/charliewilco/preside/releases/latest")!)
+        Text(
+          "Open GitHub Releases to check available downloads. Your sites are stored separately from the app."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      }
       Section("Preside CLI") {
         HStack {
           TextField("Executable", text: $store.executablePath, prompt: Text("Use bundled pp"))
@@ -41,7 +55,7 @@ struct SettingsView: View {
     }
     .formStyle(.grouped)
     .padding()
-    .frame(width: 620, height: 340)
+    .frame(width: 620, height: 500)
   }
 }
 
