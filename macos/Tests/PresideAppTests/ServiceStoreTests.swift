@@ -203,6 +203,66 @@ struct ServiceStoreTests {
     #expect(!store.isLoadingLogs)
   }
 
+  @Test func actionNoticeStaysWithTargetAcrossSelectionAndPolling() async throws {
+    let fixture = try StoreFixture(
+      """
+      case "$1" in
+        list) printf '{"started":{},"other":{}}' ;;
+        status) printf '{"status":{"process_alive":false,"identity_matches":false,"recent_log_lines":[],"log_path":"/tmp/test.log"},"missing_fields":[]}' ;;
+        run) printf 'Started target site' ;;
+        stop) printf 'Stop failed' >&2; exit 1 ;;
+      esac
+      """)
+    defer { fixture.remove() }
+    let store = ServiceStore(defaults: fixture.defaults)
+    store.selection = "other"
+    await store.perform(.start, name: "started")
+    #expect(store.selection == "other")
+    #expect(store.notice(for: "other") == nil)
+    #expect(store.notice(for: "started") == "Started target site")
+    store.selection = "started"
+    await store.refresh()
+    #expect(store.notice(for: "started") == "Started target site")
+    store.selection = "other"
+    await store.refresh()
+    #expect(store.notice(for: "other") == nil)
+    #expect(store.notice(for: "started") == "Started target site")
+    await store.perform(.stop, name: "started")
+    #expect(store.notice(for: "started") == nil)
+  }
+
+  @Test func addRenameAndRemoveNoticesFollowResultingSite() async throws {
+    let fixture = try StoreFixture(
+      """
+      case "$1" in
+        list) printf '{"added":{},"renamed":{},"other":{}}' ;;
+        status) printf '{"status":{"process_alive":false,"identity_matches":false,"recent_log_lines":[],"log_path":"/tmp/test.log"},"missing_fields":[]}' ;;
+        add) printf 'Added site' ;;
+        rename) printf 'Renamed site' ;;
+        remove) printf 'Removed site' ;;
+      esac
+      """)
+    defer { fixture.remove() }
+    let store = ServiceStore(defaults: fixture.defaults)
+    store.selection = "other"
+    let draft = ServiceDraft(name: "added", dir: "/tmp/site", command: "run", port: "8123")
+    #expect(await store.add(draft))
+    #expect(store.selection == "added")
+    #expect(store.notice(for: "added") == "Added site")
+    #expect(store.notice(for: "other") == nil)
+    #expect(await store.rename(name: "added", to: "renamed"))
+    #expect(store.selection == "renamed")
+    #expect(store.notice(for: "renamed") == "Renamed site")
+    #expect(store.notice(for: "added") == nil)
+    #expect(store.notice(for: "other") == nil)
+    await store.refresh()
+    #expect(store.notice(for: "renamed") == "Renamed site")
+    store.selection = "other"
+    #expect(await store.remove(name: "renamed"))
+    #expect(store.selection == "other")
+    #expect(store.notice(for: "other") == nil)
+  }
+
 }
 
 private struct StoreFixture {

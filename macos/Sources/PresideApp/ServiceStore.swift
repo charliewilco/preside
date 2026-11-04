@@ -29,7 +29,8 @@ final class ServiceStore {
       if newValue == nil { refreshError = nil }
     }
   }
-  var notice: String?
+  private(set) var notice: String?
+  private var noticeSiteName: String?
   var doctorOutput: String?
   var executablePath: String {
     didSet { defaults.set(executablePath, forKey: "executablePath") }
@@ -129,6 +130,10 @@ final class ServiceStore {
     return true
   }
 
+  func notice(for name: String) -> String? {
+    noticeSiteName == name ? notice : nil
+  }
+
   func perform(_ action: ServiceAction, name: String) async {
     guard await beginOperation() else { return }
     activeAction = action
@@ -139,9 +144,11 @@ final class ServiceStore {
     }
     error = nil
     notice = nil
+    noticeSiteName = nil
     defer { isBusy = false }
     do {
       let result = try await client.run(action.arguments(name: name))
+      noticeSiteName = name
       notice = [result.output, result.diagnostic].filter { !$0.isEmpty }.joined(separator: "\n")
       await loadServices()
     } catch {
@@ -167,7 +174,7 @@ final class ServiceStore {
     }
     do {
       let arguments = try name.map { try draft.updateArguments(name: $0) } ?? draft.arguments
-      return await mutate(arguments, selecting: name ?? draft.name)
+      return await mutate(arguments, targetName: name ?? draft.name)
     } catch {
       self.error = error.localizedDescription
       return false
@@ -175,23 +182,29 @@ final class ServiceStore {
   }
 
   func rename(name: String, to newName: String) async -> Bool {
-    await mutate(["rename", "--", name, newName], selecting: newName)
+    await mutate(["rename", "--", name, newName], targetName: newName)
   }
 
   func remove(name: String) async -> Bool {
-    await mutate(["remove", "--", name], selecting: nil)
+    await mutate(["remove", "--", name], targetName: name, selectTarget: false)
   }
 
-  private func mutate(_ arguments: [String], selecting name: String?) async -> Bool {
+  private func mutate(
+    _ arguments: [String], targetName: String, selectTarget: Bool = true
+  ) async -> Bool {
     guard await beginOperation() else { return false }
     error = nil
     notice = nil
+    noticeSiteName = nil
     defer { isBusy = false }
     do {
       let result = try await client.run(arguments)
+      noticeSiteName = targetName
       notice = result.output
       await loadServices()
-      if let name, services.contains(where: { $0.name == name }) { selection = name }
+      if selectTarget, services.contains(where: { $0.name == targetName }) {
+        selection = targetName
+      }
       return true
     } catch {
       self.error = error.localizedDescription

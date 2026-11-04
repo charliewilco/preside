@@ -88,7 +88,7 @@ struct ServiceDetailView: View {
             .foregroundStyle(.orange)
             .textSelection(.enabled)
         }
-        if let notice = store.notice {
+        if let notice = store.notice(for: service.name) {
           Text(notice)
             .font(.callout)
             .foregroundStyle(.secondary)

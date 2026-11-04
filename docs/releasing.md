@@ -60,6 +60,20 @@ After reviewing changes, passing CI, and updating the version, create and push t
 
 Local ad-hoc packaging tests, code-signing verification, notarization, and clean-machine acceptance are distinct gates. Do not claim the later gates from earlier ones.
 
+## Local upgrade regression
+
+After building the current development app, run:
+
+```sh
+./scripts/test-macos-upgrade.sh <prior-commit>
+```
+
+The prior commit must include the app build script and support static and command sites. An optional second argument selects a current app bundle other than `dist/Preside.app`.
+
+The check builds the prior commit in temporary storage, installs it under a path containing spaces, and creates static and command HTTP sites in an isolated HOME and XDG configuration/state directories. It replaces the installed app while both sites run, verifies unchanged configuration and PIDs, checks HTTP responses, and stops them with the new bundled CLI. Its cleanup affects only the isolated fixtures.
+
+This checks local development bundle replacement and CLI compatibility. It does not prove persistence of GUI preferences, signed/quarantined installation, minimum-OS compatibility, or clean-Mac acceptance. The script prints commit and CLI hash evidence on success.
+
 ## Manual updates
 
 Settings > Download Updates opens the latest GitHub Release. Download the appropriate app archive or DMG, quit Preside, replace the installed application, and reopen it. Configuration and runtime state live outside the app bundle. Validate continuity with existing sites before publishing an update; automatic installation and rollback are not implemented.
