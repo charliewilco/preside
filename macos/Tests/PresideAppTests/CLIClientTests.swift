@@ -91,6 +91,50 @@ struct CLIClientTests {
       throw error
     }
   }
+
+  @Test(.enabled(if: ProcessInfo.processInfo.environment["PRESIDE_TEST_CLI"] != nil))
+  func realCLIWholeSiteManagementUsesIsolatedHome() async throws {
+    let executable = try #require(ProcessInfo.processInfo.environment["PRESIDE_TEST_CLI"])
+    let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    var environment = ProcessInfo.processInfo.environment
+    environment["HOME"] = home.path
+    let client = CLIClient(
+      executableURL: URL(fileURLWithPath: executable), environment: environment, timeout: 15)
+    var draft = ServiceDraft(
+      name: "management", dir: home.path, command: "exec /bin/sleep 60", port: "54322",
+      readiness: "process", environment: "PRESIDE_TEST=one")
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    _ = try await client.run(draft.arguments)
+    do {
+      _ = try await client.run(ServiceAction.start.arguments(name: draft.name))
+      let before = try await client.run(["status", "--json", "--", draft.name])
+      let beforeReport = try decoder.decode(StatusReport.self, from: Data(before.output.utf8))
+      draft.environment = "PRESIDE_TEST=two"
+      _ = try await client.run(draft.updateArguments(name: draft.name))
+      let changed = try await client.run(["status", "--json", "--", draft.name])
+      let changedReport = try decoder.decode(StatusReport.self, from: Data(changed.output.utf8))
+      #expect(changedReport.status.stateMatchesConfig == false)
+      _ = try await client.run(ServiceAction.restart.arguments(name: draft.name))
+      let restarted = try await client.run(["status", "--json", "--", draft.name])
+      let restartedReport = try decoder.decode(StatusReport.self, from: Data(restarted.output.utf8))
+      #expect(restartedReport.status.pid != beforeReport.status.pid)
+      #expect(restartedReport.status.stateMatchesConfig == true)
+      _ = try await client.run(ServiceAction.stop.arguments(name: draft.name))
+      _ = try await client.run(["rename", "--", draft.name, "renamed"])
+      _ = try await client.run(["remove", "--", "renamed"])
+      let remaining = try await client.run(["list", "--json"])
+      #expect(
+        try decoder.decode([String: ServiceConfig].self, from: Data(remaining.output.utf8)).isEmpty)
+    } catch {
+      _ = try? await client.run(["stop", "--", draft.name])
+      _ = try? await client.run(["stop", "--", "renamed"])
+      throw error
+    }
+  }
+
 }
 
 private struct ScriptFixture {

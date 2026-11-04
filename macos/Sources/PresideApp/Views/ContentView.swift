@@ -61,6 +61,7 @@ struct ContentView: View {
 
         if let service = store.services.first(where: { $0.name == store.selection }) {
           ServiceDetailView(store: store, service: service)
+            .id(service.name)
         } else {
           ContentUnavailableView {
             Label("Your Local Sites", systemImage: "server.rack")
@@ -93,6 +94,9 @@ struct ContentView: View {
       }
     }
     .sheet(isPresented: $store.showingAddSite) { AddServiceView(store: store) }
+    .sheet(item: $store.editingSite) { service in
+      AddServiceView(store: store, existing: service)
+    }
     .sheet(
       isPresented: Binding(
         get: { store.doctorOutput != nil },

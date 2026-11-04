@@ -36,7 +36,7 @@ impl Config {
         }
 
         let contents = toml::to_string_pretty(self).context("failed to serialize config")?;
-        fs::write(path, contents)
+        crate::storage::atomic_write(path, contents.as_bytes())
             .with_context(|| format!("failed to write config at {}", path.display()))
     }
 
@@ -55,6 +55,22 @@ impl Config {
             return Err(ServiceError::ServiceExists(service.name).into());
         }
 
+        let config = Self::validated_service(&service)?;
+        self.services.insert(service.name, config);
+        Ok(())
+    }
+
+    pub fn update_service(&mut self, service: AddService) -> Result<()> {
+        validate_service_name(&service.name)?;
+        if !self.services.contains_key(&service.name) {
+            return Err(ServiceError::MissingService(service.name).into());
+        }
+        let config = Self::validated_service(&service)?;
+        self.services.insert(service.name, config);
+        Ok(())
+    }
+
+    fn validated_service(service: &AddService) -> Result<ServiceConfig> {
         let mut config = ServiceConfig::default();
         config.set(ServiceField::parse("dir")?, &service.dir)?;
         config.kind = service.kind;
@@ -78,17 +94,15 @@ impl Config {
             config.set(ServiceField::parse("health_path")?, health_path)?;
         }
 
-        for pair in service.env {
+        for pair in &service.env {
             let Some((key, value)) = pair.split_once('=') else {
-                return Err(ServiceError::InvalidEnvAssignment(pair).into());
+                return Err(ServiceError::InvalidEnvAssignment(pair.clone()).into());
             };
             config.set(ServiceField::parse(&format!("env.{key}"))?, value)?;
         }
 
         config.validate(&service.name)?;
-        self.services.insert(service.name, config);
-
-        Ok(())
+        Ok(config)
     }
 
     pub fn unset_field(&mut self, service: &str, field: &str) -> Result<()> {

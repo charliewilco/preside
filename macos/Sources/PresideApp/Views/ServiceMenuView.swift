@@ -11,6 +11,7 @@ struct ServiceMenuView: View {
       NSApp.activate(ignoringOtherApps: true)
     }
     Button("Add Site…", systemImage: "plus") {
+      store.editingSite = nil
       store.doctorOutput = nil
       store.showingAddSite = true
       openWindow(id: "services")
@@ -28,6 +29,21 @@ struct ServiceMenuView: View {
           .disabled(store.isBusy || !service.canStart)
         Button("Stop") { Task { await store.perform(.stop, name: service.name) } }
           .disabled(store.isBusy || !service.canStop)
+        Button("Restart") { Task { await store.perform(.restart, name: service.name) } }
+          .disabled(store.isBusy || !service.canStop)
+        Button("Edit Site…") {
+          store.showingAddSite = false
+          store.doctorOutput = nil
+          store.error = nil
+          store.editingSite = service
+          openWindow(id: "services")
+          NSApp.activate(ignoringOtherApps: true)
+        }
+        .disabled(
+          store.isBusy || service.error != nil || service.report == nil
+            || (service.report?.status.processAlive == true
+              && service.report?.status.identityMatches != true)
+        )
         Button("Open in Browser") { Task { await store.perform(.open, name: service.name) } }
           .disabled(store.isBusy || service.report?.status.url == nil)
         Button("Show Details") {

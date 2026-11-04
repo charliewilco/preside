@@ -126,3 +126,9 @@ readiness = "port"
 `kind` is `command` or `static`; existing definitions without `kind` remain command services. `command` is required only for command services and is ignored for static sites. Static serving uses Preside's built-in server, requires a port from 1 through 65535, and does not require a system runtime. Choose the public output directory, rather than a repository root containing private files.
 
 A configured domain still requires external DNS/proxy setup. The static server also accepts that domain as a Host header; Preside does not create DNS records or proxies.
+
+## Transactional Changes
+
+Preside serializes CLI/app mutations with an operating-system file lock at `~/.local/state/preside/mutation.lock`. The lock is acquired before configuration discovery and loading so concurrent changes cannot overwrite a stale snapshot. It is released automatically on process exit, including crashes. An operation waiting more than 15 seconds reports a busy error.
+
+Configuration saves write a private temporary file, sync it, replace the destination atomically, and sync the parent directory. Config and runtime files are written with owner-only permissions. Existing config symlinks retain their link and update the resolved target. Direct edits by unrelated text editors do not participate in Preside's lock; use `update --expected-config` for conflict-aware clients.

@@ -79,7 +79,7 @@ Removes a service from config.
 pp remove personal
 ```
 
-This only edits config. It does not stop a running detached process; run `pp stop <service>` first when needed.
+Removal requires the site to be stopped. A running or unknown live process is rejected with a stop-first message; the command never silently strands a server.
 
 ## `pp rename <old> <new>`
 
@@ -89,7 +89,7 @@ Renames a configured service.
 pp rename personal work
 ```
 
-This edits config only. Runtime state for the old name is not renamed.
+Both names must be free of live processes. Stop the site first; stale runtime files are cleaned before the configuration is renamed. Existing logs remain under their original name.
 
 ## `pp info <service>`
 
@@ -285,3 +285,24 @@ pp stop docs
 `--static` and `--command` are mutually exclusive. A static site requires a nonzero port. All existing status, logs, doctor, foreground, and detached lifecycle commands work for static sites. `pp set docs kind static` switches an existing definition to static serving; `pp set docs kind command` restores command execution (a command must then be configured).
 
 The built-in server binds only to IPv4 loopback, serves GET/HEAD requests, selects MIME types, and serves `index.html` for directories. Directories without an index return 404; directory listings and SPA fallback routing are not provided. Dotfiles, parent-path traversal, and symlinks escaping the site root are not served. Only localhost, 127.0.0.1, and the explicitly configured domain are accepted as HTTP hosts.
+
+## `pp update <service>`
+
+Replace the complete configuration of an existing site in one validated transaction. It accepts the same directory, command/static, port, domain, readiness, health-path, and environment options as `add`. Omitted optional fields are removed. Updating a running site does not restart it; status reports configuration drift until an explicit restart.
+
+```sh
+pp update personal --dir ~/Code/personal --command "npm run dev" --port 8712
+pp update docs --dir ~/Code/docs/dist --static --port 8080
+```
+
+Clients editing a previously loaded configuration should pass `--expected-config '<service JSON>'`. Preside compares this snapshot under the operation lock and rejects a stale edit without overwriting newer changes. Unknown live process identities cannot be updated.
+
+## `pp restart <service>`
+
+Validate the configured site and directory, stop the verified existing process, and start the site detached under one operation lock. An invalid configuration or missing directory is rejected before stopping the existing server.
+
+```sh
+pp restart personal
+```
+
+`pp stop` remains available even when the configuration file is invalid.

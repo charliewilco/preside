@@ -140,6 +140,66 @@ struct ServiceModelsTests {
     #expect(config.dir == "/tmp/site")
   }
 
+  @Test func editPreservesMultilineEnvironmentAndAdvancedStaticSettings() throws {
+    let entry = ServiceEntry(
+      name: "docs",
+      config: ServiceConfig(
+        dir: "/tmp/docs", port: 8123, readiness: "http", healthPath: "/health",
+        env: ["CERT": "line1\nline2", "EMPTY": ""], kind: "static"
+      ))
+    var draft = ServiceDraft(entry: entry)
+    draft.port = "8124"
+    #expect(draft.validationError == nil)
+    let arguments = try draft.updateArguments(name: entry.name)
+    #expect(arguments.first == "update")
+    #expect(arguments.last == "docs")
+    #expect(arguments.contains("--static"))
+    #expect(arguments.contains("CERT=line1\nline2"))
+    #expect(arguments.contains("EMPTY="))
+    #expect(arguments.contains("http"))
+    #expect(arguments.contains("/health"))
+    #expect(arguments.contains("8124"))
+  }
+
+  @Test func commandEditPreservesUntouchedMultilineValues() throws {
+    let entry = ServiceEntry(
+      name: "worker",
+      config: ServiceConfig(
+        dir: "/tmp/app", command: "run-server", port: 8123, readiness: "port",
+        healthPath: "/health", env: ["KEY": "a\nb"]
+      ))
+    var draft = ServiceDraft(entry: entry)
+    draft.command = "run-another-server"
+    #expect(draft.validationError == nil)
+    #expect(try draft.updateArguments(name: "worker").contains("KEY=a\nb"))
+    #expect(try draft.updateArguments(name: "worker").contains("/health"))
+    draft.environment = "KEY=replaced"
+    #expect(draft.arguments.contains("KEY=replaced"))
+    #expect(!draft.arguments.contains("KEY=a\nb"))
+    #expect(ServiceAction.restart.arguments(name: "worker") == ["restart", "--", "worker"])
+  }
+
+  @Test func structuredEnvironmentEditsPreserveMultilineValues() throws {
+    var draft = ServiceDraft(
+      entry: ServiceEntry(
+        name: "app",
+        config: ServiceConfig(
+          dir: "/tmp/app", command: "run", port: 8123,
+          env: ["CERT": "first\nSECOND=part", "OTHER": "old"])))
+    draft.prepareEnvironmentEditor()
+    let index = try #require(draft.environmentVariables?.firstIndex { $0.key == "OTHER" })
+    draft.environmentVariables?[index].value = "changed"
+    #expect(draft.validationError == nil)
+    #expect(draft.arguments.contains("CERT=first\nSECOND=part"))
+    #expect(draft.arguments.contains("OTHER=changed"))
+    #expect(!draft.arguments.contains("SECOND=part"))
+    let update = try draft.updateArguments(name: "app")
+    let expectedIndex = try #require(update.firstIndex(of: "--expected-config"))
+    let expected = try JSONDecoder().decode(
+      ServiceConfig.self, from: Data(update[expectedIndex + 1].utf8))
+    #expect(expected.env?["OTHER"] == "old")
+  }
+
   private func validDraft() -> ServiceDraft {
     ServiceDraft(name: "app", dir: "/tmp/project", command: "npm run dev", port: "8123")
   }

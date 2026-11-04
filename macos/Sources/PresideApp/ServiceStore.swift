@@ -8,6 +8,7 @@ final class ServiceStore {
   var services: [ServiceEntry] = []
   var selection: String?
   var showingAddSite = false
+  var editingSite: ServiceEntry?
   var isRefreshing = false
   var isBusy = false
   private var actionError: String?
@@ -135,20 +136,46 @@ final class ServiceStore {
   }
 
   func add(_ draft: ServiceDraft) async -> Bool {
+    await save(draft, replacing: nil)
+  }
+
+  func update(name: String, draft: ServiceDraft) async -> Bool {
+    await save(draft, replacing: name)
+  }
+
+  private func save(_ draft: ServiceDraft, replacing name: String?) async -> Bool {
     guard !isBusy else { return false }
     if let validation = draft.validationError {
       error = validation
       return false
     }
+    do {
+      let arguments = try name.map { try draft.updateArguments(name: $0) } ?? draft.arguments
+      return await mutate(arguments, selecting: name ?? draft.name)
+    } catch {
+      self.error = error.localizedDescription
+      return false
+    }
+  }
+
+  func rename(name: String, to newName: String) async -> Bool {
+    await mutate(["rename", "--", name, newName], selecting: newName)
+  }
+
+  func remove(name: String) async -> Bool {
+    await mutate(["remove", "--", name], selecting: nil)
+  }
+
+  private func mutate(_ arguments: [String], selecting name: String?) async -> Bool {
     guard await beginOperation() else { return false }
     error = nil
     notice = nil
     defer { isBusy = false }
     do {
-      let result = try await client.run(draft.arguments)
+      let result = try await client.run(arguments)
       notice = result.output
       await loadServices()
-      selection = draft.name
+      if let name, services.contains(where: { $0.name == name }) { selection = name }
       return true
     } catch {
       self.error = error.localizedDescription

@@ -4,13 +4,22 @@ import SwiftUI
 struct AddServiceView: View {
   @Bindable var store: ServiceStore
   @Environment(\.dismiss) private var dismiss
-  @State private var draft = ServiceDraft()
+  let existing: ServiceEntry?
+  @State private var draft: ServiceDraft
+
+  init(store: ServiceStore, existing: ServiceEntry? = nil) {
+    self.store = store
+    self.existing = existing
+    var initialDraft = existing.map { ServiceDraft(entry: $0) } ?? ServiceDraft()
+    initialDraft.prepareEnvironmentEditor()
+    _draft = State(initialValue: initialDraft)
+  }
 
   private var isStatic: Bool { draft.kind == "static" }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      Text("Add Site").font(.title2.bold())
+      Text(existing == nil ? "Add Site" : "Edit Site").font(.title2.bold())
       Text("Choose a static folder or a command that starts your development server.")
         .foregroundStyle(.secondary)
       Form {
@@ -35,6 +44,7 @@ struct AddServiceView: View {
             .foregroundStyle(.secondary)
           }
           TextField("Name", text: $draft.name, prompt: Text("my-site"))
+            .disabled(existing != nil)
           HStack {
             TextField(
               isStatic ? "Site folder" : "Project folder", text: $draft.dir,
@@ -66,18 +76,12 @@ struct AddServiceView: View {
           .font(.caption)
           .foregroundStyle(.secondary)
           if !isStatic {
-            VStack(alignment: .leading, spacing: 6) {
-              Text("Environment variables")
-              TextEditor(text: $draft.environment)
-                .accessibilityLabel("Environment variables")
-                .accessibilityHint("One KEY=value per line")
-                .font(.system(.body, design: .monospaced))
-                .frame(height: 70)
-                .border(.separator)
-              Text("One KEY=value per line. Values are saved in your Preside configuration.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
+            EnvironmentEditorView(
+              variables: Binding(
+                get: { draft.environmentVariables ?? [] },
+                set: { draft.environmentVariables = $0 }
+              )
+            )
           }
         }
       }
@@ -87,9 +91,13 @@ struct AddServiceView: View {
       if let error = store.error {
         Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled)
       }
-      Text("Adding a site saves its settings. Choose Start when you’re ready to run it.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      Text(
+        existing == nil
+          ? "Adding a site saves its settings. Choose Start when you’re ready to run it."
+          : "Saving changes updates this site’s settings. Restart a running site to apply them."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
       HStack {
         if let error = draft.validationError {
           Text(error).font(.caption).foregroundStyle(.secondary)
@@ -98,8 +106,16 @@ struct AddServiceView: View {
         Button("Cancel") { dismiss() }
           .keyboardShortcut(.cancelAction)
           .disabled(store.isBusy)
-        Button("Add Site") {
-          Task { if await store.add(draft) { dismiss() } }
+        Button(existing == nil ? "Add Site" : "Save Changes") {
+          Task {
+            let saved: Bool
+            if let existing {
+              saved = await store.update(name: existing.name, draft: draft)
+            } else {
+              saved = await store.add(draft)
+            }
+            if saved { dismiss() }
+          }
         }
         .keyboardShortcut(.defaultAction)
         .disabled(store.isBusy || draft.validationError != nil)

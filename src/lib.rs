@@ -4,13 +4,14 @@ pub mod paths;
 pub mod process;
 pub mod service;
 pub mod static_site;
+pub mod storage;
 
 use std::process::ExitCode;
 
 use crate::cli::{Cli, Commands};
 use crate::config::{AddService, Config};
 use crate::paths::PresidePaths;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 
@@ -20,7 +21,29 @@ pub fn run() -> Result<ExitCode> {
         static_site::serve(dir, *port, domain.as_deref())?;
         return Ok(ExitCode::SUCCESS);
     }
+    let _mutation_lock = if matches!(
+        &cli.command,
+        Commands::Add { .. }
+            | Commands::Update { .. }
+            | Commands::Set { .. }
+            | Commands::Unset { .. }
+            | Commands::Remove { .. }
+            | Commands::Rename { .. }
+            | Commands::Restart { .. }
+            | Commands::Run { detach: true, .. }
+            | Commands::Stop { .. }
+            | Commands::Doctor { fix: true, .. }
+            | Commands::Edit
+    ) {
+        Some(storage::MutationLock::acquire()?)
+    } else {
+        None
+    };
     let paths = PresidePaths::discover()?;
+    if let Commands::Stop { service } = &cli.command {
+        process::stop_service(service, &paths)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let mut config = Config::load(&paths.config_path)?;
 
     match cli.command {
@@ -59,6 +82,52 @@ pub fn run() -> Result<ExitCode> {
             println!("added {service}");
             Ok(ExitCode::SUCCESS)
         }
+        Commands::Update {
+            service,
+            expected_config,
+            dir,
+            command,
+            static_site,
+            port,
+            domain,
+            readiness,
+            health_path,
+            env,
+        } => {
+            if let Some(expected) = expected_config {
+                let expected: crate::service::ServiceConfig = serde_json::from_str(&expected)
+                    .context("expected-config must be a service JSON object")?;
+                if config.services.get(&service) != Some(&expected) {
+                    anyhow::bail!("site changed since editing; reopen the editor before saving");
+                }
+            }
+            process::require_known_or_stopped(&service, &paths)?;
+            config.update_service(AddService {
+                name: service.clone(),
+                kind: if static_site {
+                    crate::service::ServiceKind::Static
+                } else {
+                    crate::service::ServiceKind::Command
+                },
+                dir,
+                command,
+                port,
+                domain,
+                readiness,
+                health_path,
+                env,
+            })?;
+            config.save(&paths.config_path)?;
+            println!("updated {service}; restart the site to apply changes if it is running");
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::Restart { service } => {
+            let service = config.require_service(&service)?;
+            process::expand_service_dir(&service)?;
+            process::stop_service(&service.name, &paths)?;
+            process::run_detached(&service, &paths)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Commands::Run { service, detach } => {
             let service = config.require_service(&service)?;
 
@@ -78,24 +147,29 @@ pub fn run() -> Result<ExitCode> {
             field,
             value,
         } => {
+            process::require_known_or_stopped(&service, &paths)?;
             config.set_field(&service, &field, &value)?;
             config.save(&paths.config_path)?;
             println!("set {service}.{field}");
             Ok(ExitCode::SUCCESS)
         }
         Commands::Unset { service, field } => {
+            process::require_known_or_stopped(&service, &paths)?;
             config.unset_field(&service, &field)?;
             config.save(&paths.config_path)?;
             println!("unset {service}.{field}");
             Ok(ExitCode::SUCCESS)
         }
         Commands::Remove { service } => {
+            process::require_stopped(&service, &paths)?;
             config.remove_service(&service)?;
             config.save(&paths.config_path)?;
             println!("removed {service}");
             Ok(ExitCode::SUCCESS)
         }
         Commands::Rename { old, new } => {
+            process::require_stopped(&old, &paths)?;
+            process::require_stopped(&new, &paths)?;
             config.rename_service(&old, &new)?;
             config.save(&paths.config_path)?;
             println!("renamed {old} to {new}");
@@ -571,11 +645,11 @@ mod commands {
             let status =
                 process::service_status(name, service.as_ref(), service_config.port, paths)?;
 
-            if status.pid_file_exists && !status.process_alive {
+            if (status.pid_file_exists || status.state.is_some()) && !status.process_alive {
                 report.issues += 1;
                 service_report
                     .checks
-                    .push(issue("process", "stale PID file"));
+                    .push(issue("process", "stale PID file or runtime state"));
 
                 if fix {
                     process::cleanup_runtime_files(name, paths)?;

@@ -144,11 +144,25 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
     let pid = child.id();
 
     let pid_path = paths.pid_path(&service.name);
-    fs::write(&pid_path, format!("{pid}\n"))
-        .with_context(|| format!("failed to write PID file {}", pid_path.display()))?;
-
+    let mut startup = StartupGuard {
+        child: &mut child,
+        paths,
+        name: &service.name,
+        committed: false,
+    };
     let state = ServiceState::new(service, pid, &dir, &log_path);
+    if state.process_started_at.is_none() {
+        if let Some(status) = startup.child.try_wait()? {
+            bail!(
+                "{} exited shortly after starting with status {status}",
+                service.name
+            );
+        }
+        bail!("could not verify the newly started process identity; startup was rolled back");
+    }
     write_state(paths, &state)?;
+    crate::storage::atomic_write(&pid_path, format!("{pid}\n").as_bytes())
+        .with_context(|| format!("failed to write PID file {}", pid_path.display()))?;
     append_lifecycle_event(
         &log_path,
         &format!(
@@ -160,7 +174,7 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
 
     thread::sleep(STARTUP_ALIVE_WAIT);
 
-    if let Some(status) = child.try_wait()? {
+    if let Some(status) = startup.child.try_wait()? {
         let recent_logs = recent_log_lines(&log_path, 20)?;
         cleanup_runtime_files(&service.name, paths)?;
 
@@ -194,6 +208,14 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
     }
 
     let ready = wait_until_ready(service);
+    if let Some(status) = startup.child.try_wait()? {
+        bail!(
+            "{} exited while waiting for readiness with status {status}\nrecent logs:\n{}",
+            service.name,
+            recent_log_lines(&log_path, 20)?.join("\n")
+        );
+    }
+    startup.committed = true;
 
     println!("started {} with PID {pid}", service.name);
     println!("log: {}", log_path.display());
@@ -210,6 +232,60 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+struct StartupGuard<'a> {
+    child: &'a mut std::process::Child,
+    paths: &'a PresidePaths,
+    name: &'a str,
+    committed: bool,
+}
+
+impl Drop for StartupGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let pid = self.child.id() as i32;
+        let stopped = match self.child.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => {
+                let group_signal = send_signal(pid, Signal::SIGKILL);
+                let child_signal = self.child.kill();
+                if group_signal.is_ok() || child_signal.is_ok() {
+                    self.child.wait().is_ok()
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        };
+        if stopped {
+            let _ = cleanup_runtime_files(self.name, self.paths);
+        } else {
+            eprintln!(
+                "could not finish startup rollback for {} (PID {pid}); retaining runtime state",
+                self.name
+            );
+        }
+    }
+}
+
+pub fn require_known_or_stopped(name: &str, paths: &PresidePaths) -> Result<()> {
+    let status = service_status(name, None, None, paths)?;
+    if status.process_alive && !status.identity_matches {
+        bail!("{name} has an unknown live process; resolve its runtime state before changing the site");
+    }
+    Ok(())
+}
+
+pub fn require_stopped(name: &str, paths: &PresidePaths) -> Result<()> {
+    let status = service_status(name, None, None, paths)?;
+    if status.process_alive {
+        bail!("{name} is still running or has an unknown live process; stop the site before renaming or removing it");
+    }
+    cleanup_runtime_files(name, paths)?;
     Ok(())
 }
 
@@ -255,8 +331,7 @@ pub fn stop_service(service: &str, paths: &PresidePaths) -> Result<()> {
         return Ok(());
     }
 
-    println!("{service} did not stop after SIGKILL; leaving state in place.");
-    Ok(())
+    bail!("{service} did not stop after SIGKILL; leaving state in place")
 }
 
 pub fn service_status(
@@ -270,12 +345,24 @@ pub fn service_status(
     let pid_path = paths.pid_path(name);
     let log_path = paths.log_path(name);
     let state_path = paths.service_state_path(name);
-    let pid = read_pid(&pid_path)?;
+    let recorded_pid = read_pid(&pid_path)?;
+    let pid_file_exists = recorded_pid.is_some();
     let state = read_state(&state_path)?;
+    let pid = match (recorded_pid, state.as_ref()) {
+        (Some(pid), _) => Some(pid),
+        (None, Some(state)) => {
+            let pid = i32::try_from(state.pid).context("runtime state contains an invalid PID")?;
+            if pid <= 0 {
+                bail!("runtime state contains an invalid PID");
+            }
+            Some(pid)
+        }
+        (None, None) => None,
+    };
     let process_alive = pid.is_some_and(process_alive);
     let identity_matches = pid
         .zip(state.as_ref())
-        .is_some_and(|(pid, state)| state_identifies_process(state, pid));
+        .is_some_and(|(pid, state)| state.name == name && state_identifies_process(state, pid));
     let state_matches_config = service.map(|service| {
         state
             .as_ref()
@@ -291,7 +378,7 @@ pub fn service_status(
         log_path,
         state_path,
         pid,
-        pid_file_exists: pid.is_some(),
+        pid_file_exists,
         process_alive,
         identity_matches,
         state_matches_config,
@@ -577,10 +664,13 @@ fn read_pid(path: &Path) -> Result<Option<i32>> {
         return Err(anyhow!("PID file is empty: {}", path.display()));
     }
 
-    trimmed
+    let pid = trimmed
         .parse::<i32>()
-        .map(Some)
-        .with_context(|| format!("invalid PID in {}", path.display()))
+        .with_context(|| format!("invalid PID in {}", path.display()))?;
+    if pid <= 0 {
+        bail!("invalid PID in {}", path.display());
+    }
+    Ok(Some(pid))
 }
 
 fn read_state(path: &Path) -> Result<Option<ServiceState>> {
@@ -599,7 +689,7 @@ fn write_state(paths: &PresidePaths, state: &ServiceState) -> Result<()> {
     let path = paths.service_state_path(&state.name);
     let contents = toml::to_string_pretty(state).context("failed to serialize service state")?;
 
-    fs::write(&path, contents)
+    crate::storage::atomic_write(&path, contents.as_bytes())
         .with_context(|| format!("failed to write service state {}", path.display()))
 }
 
@@ -931,5 +1021,41 @@ mod tests {
 
         assert!(!ready);
         assert!(elapsed < Duration::from_secs(1), "elapsed: {elapsed:?}");
+    }
+    #[test]
+    fn failed_runtime_persistence_terminates_new_child() {
+        let home = TempDir::new().unwrap();
+        let paths = PresidePaths::from_home(home.path());
+        fs::create_dir_all(&paths.state_dir).unwrap();
+        fs::write(&paths.service_state_dir, "not a directory").unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        unsafe {
+            command.pre_exec(|| {
+                setsid().map_err(std::io::Error::other)?;
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        {
+            let guard = StartupGuard {
+                child: &mut child,
+                paths: &paths,
+                name: "personal",
+                committed: false,
+            };
+            let state = ServiceState::new(
+                &service(None),
+                pid,
+                home.path(),
+                &paths.log_path("personal"),
+            );
+            assert!(write_state(&paths, &state).is_err());
+            drop(guard);
+        }
+        assert!(!process_alive(pid as i32));
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(!paths.pid_path("personal").exists());
     }
 }

@@ -52,6 +52,34 @@ pub enum Commands {
         #[arg(long = "env")]
         env: Vec<String>,
     },
+    Update {
+        service: String,
+        #[arg(long)]
+        expected_config: Option<String>,
+        #[arg(long)]
+        dir: String,
+        #[arg(
+            long,
+            required_unless_present = "static_site",
+            conflicts_with = "static_site"
+        )]
+        command: Option<String>,
+        #[arg(long = "static")]
+        static_site: bool,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        readiness: Option<Readiness>,
+        #[arg(long = "health-path")]
+        health_path: Option<String>,
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
+    Restart {
+        service: String,
+    },
     #[command(alias = "r")]
     Run {
         service: String,

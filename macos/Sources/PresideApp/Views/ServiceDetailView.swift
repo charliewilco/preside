@@ -4,6 +4,18 @@ import SwiftUI
 struct ServiceDetailView: View {
   @Bindable var store: ServiceStore
   let service: ServiceEntry
+  @State private var renamingSite: ServiceEntry?
+  @State private var showingRemoveConfirmation = false
+  @State private var removalSite: ServiceEntry?
+
+  private var canManage: Bool {
+    guard service.error == nil, let status = service.report?.status else { return false }
+    return !status.processAlive || status.identityMatches
+  }
+
+  private var canRenameOrRemove: Bool {
+    canManage && service.report?.status.processAlive == false
+  }
 
   var body: some View {
     ScrollView {
@@ -15,9 +27,33 @@ struct ServiceDetailView: View {
               .foregroundStyle(service.canStop ? Color.green : Color.secondary)
           }
           Spacer()
-          if store.isBusy {
-            ProgressView().controlSize(.small).accessibilityLabel("Running site action")
+          Menu("Manage Site", systemImage: "ellipsis.circle") {
+            Button("Edit Site…", systemImage: "pencil") {
+              store.error = nil
+              store.editingSite = service
+            }
+            .disabled(store.isBusy || !canManage)
+            Button("Rename…") {
+              store.error = nil
+              renamingSite = service
+            }
+            .disabled(store.isBusy || !canRenameOrRemove)
+            Divider()
+            Button("Remove Site…", role: .destructive) {
+              removalSite = service
+              showingRemoveConfirmation = true
+            }
+            .disabled(store.isBusy || !canRenameOrRemove)
+            if !canManage {
+              Text("Resolve this site’s status before changing it.")
+            } else if !canRenameOrRemove {
+              Text("Stop the site before renaming or removing it.")
+            }
           }
+          .fixedSize()
+        }
+
+        HStack {
           Button(
             service.canStop ? "Stop" : "Start",
             systemImage: service.canStop ? "stop.fill" : "play.fill"
@@ -26,10 +62,18 @@ struct ServiceDetailView: View {
           }
           .buttonStyle(.borderedProminent)
           .disabled(store.isBusy || !(service.canStart || service.canStop))
+          Button("Restart", systemImage: "arrow.clockwise") {
+            Task { await store.perform(.restart, name: service.name) }
+          }
+          .disabled(store.isBusy || !service.canStop)
           Button("Open", systemImage: "arrow.up.right.square") {
             Task { await store.perform(.open, name: service.name) }
           }
           .disabled(store.isBusy || service.report?.status.url == nil)
+          Spacer()
+          if store.isBusy {
+            ProgressView().controlSize(.small).accessibilityLabel("Running site action")
+          }
         }
 
         if let error = service.error {
@@ -53,7 +97,7 @@ struct ServiceDetailView: View {
           }
           if report.status.processAlive && report.status.stateMatchesConfig == false {
             Label(
-              "The running site uses older configuration. Stop and start it to apply your changes.",
+              "The running site uses older configuration. Restart it to apply your changes.",
               systemImage: "exclamationmark.triangle"
             )
             .foregroundStyle(.orange)
@@ -138,6 +182,21 @@ struct ServiceDetailView: View {
           .foregroundStyle(.secondary)
       }
       .padding(28)
+    }
+    .sheet(item: $renamingSite) { site in
+      RenameSiteView(store: store, service: site)
+    }
+    .confirmationDialog(
+      "Remove Site?", isPresented: $showingRemoveConfirmation,
+      titleVisibility: .visible, presenting: removalSite
+    ) { site in
+      Button("Remove Site", role: .destructive) {
+        let name = site.name
+        Task { _ = await store.remove(name: name) }
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: { site in
+      Text("This removes \(site.name) from Preside. Your project files are kept.")
     }
   }
 
