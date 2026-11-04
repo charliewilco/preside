@@ -2,15 +2,20 @@ import SwiftUI
 
 struct ServiceRowView: View {
   let service: ServiceEntry
+  var action: ServiceAction? = nil
+
+  private var status: SiteStatusPresentation {
+    SiteStatusPresentation(service: service, action: action)
+  }
 
   var body: some View {
     HStack(spacing: 10) {
-      Image(systemName: service.canStop ? "play.circle.fill" : "circle")
-        .foregroundStyle(service.canStop ? Color.green : Color.secondary)
+      Image(systemName: status.symbol)
+        .foregroundStyle(status.color)
         .accessibilityHidden(true)
       VStack(alignment: .leading, spacing: 3) {
         Text(service.name).font(.headline)
-        Text(service.stateLabel)
+        Text(status.title)
           .font(.caption)
           .foregroundStyle(.secondary)
       }

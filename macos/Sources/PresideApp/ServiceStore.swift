@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import UniformTypeIdentifiers
 
 @MainActor
 @Observable
@@ -11,6 +12,14 @@ final class ServiceStore {
   var editingSite: ServiceEntry?
   var isRefreshing = false
   var isBusy = false
+  var activeActionName: String?
+  var activeAction: ServiceAction?
+  var logSiteName: String?
+  var logOutput = ""
+  var logError: String?
+  var isLoadingLogs = false
+  private var loadingLogSiteName: String?
+  private var logRequestID: UUID?
   private var actionError: String?
   private var refreshError: String?
   var error: String? {
@@ -47,7 +56,8 @@ final class ServiceStore {
 
   private var client: CLIClient {
     var environment = ProcessInfo.processInfo.environment
-    environment["PATH"] = searchPath
+    let resolvedSearchPath = SetupAssistance.normalizedSearchPath(searchPath)
+    environment["PATH"] = resolvedSearchPath
     let executable: URL
     if !executablePath.isEmpty {
       executable = URL(fileURLWithPath: (executablePath as NSString).expandingTildeInPath)
@@ -56,7 +66,7 @@ final class ServiceStore {
     {
       executable = bundled
     } else {
-      let paths = searchPath.split(separator: ":").map {
+      let paths = resolvedSearchPath.split(separator: ":").map {
         URL(fileURLWithPath: String($0)).appendingPathComponent("pp")
       }
       executable =
@@ -121,6 +131,12 @@ final class ServiceStore {
 
   func perform(_ action: ServiceAction, name: String) async {
     guard await beginOperation() else { return }
+    activeAction = action
+    activeActionName = name
+    defer {
+      activeAction = nil
+      activeActionName = nil
+    }
     error = nil
     notice = nil
     defer { isBusy = false }
@@ -197,6 +213,46 @@ final class ServiceStore {
     } catch { self.error = error.localizedDescription }
   }
 
+  func refreshLogs(name: String) async {
+    guard !isLoadingLogs || loadingLogSiteName != name else { return }
+    let requestID = UUID()
+    logRequestID = requestID
+    loadingLogSiteName = name
+    isLoadingLogs = true
+    defer {
+      if logRequestID == requestID {
+        isLoadingLogs = false
+        loadingLogSiteName = nil
+      }
+    }
+    do {
+      let result = try await client.run(["logs", "--json", "--lines", "500", "--", name])
+      let report = try JSONDecoder().decode(LogReport.self, from: Data(result.output.utf8))
+      guard logSiteName == name, logRequestID == requestID else { return }
+      logOutput = report.lines.joined(separator: "\n")
+      logError = nil
+    } catch {
+      guard logSiteName == name, logRequestID == requestID else { return }
+      logError = error.localizedDescription
+    }
+  }
+
+  func copyLogs() {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(logOutput, forType: .string)
+  }
+
+  func exportLogs(name: String) async {
+    let snapshot = logOutput
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = "\(name)-logs.txt"
+    panel.allowedContentTypes = [.plainText]
+    guard await panel.begin() == .OK, let url = panel.url else { return }
+    do { try snapshot.write(to: url, atomically: true, encoding: .utf8) } catch {
+      logError = error.localizedDescription
+    }
+  }
+
   func revealConfig() async {
     do {
       let result = try await client.run(["path"])
@@ -222,4 +278,9 @@ private struct DoctorCheck: Decodable {
   var name: String
   var ok: Bool
   var message: String
+}
+
+private struct LogReport: Decodable {
+  var path: String
+  var lines: [String]
 }

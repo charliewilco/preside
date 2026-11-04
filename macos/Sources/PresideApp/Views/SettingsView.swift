@@ -40,6 +40,16 @@ struct SettingsView: View {
         TextField("PATH", text: $store.searchPath, axis: .vertical)
           .lineLimit(3...6)
           .font(.system(.body, design: .monospaced))
+        Button("Add Tool Directory…") {
+          let panel = NSOpenPanel()
+          panel.canChooseDirectories = true
+          panel.canChooseFiles = false
+          panel.allowsMultipleSelection = false
+          if panel.runModal() == .OK, let url = panel.url {
+            store.searchPath = SetupAssistance.prepending(directory: url.path, to: store.searchPath)
+          }
+        }
+        ToolLookupView(searchPath: store.searchPath)
         Text(
           "Server commands inherit this search path. Add directories containing your tools, such as Node or Python. Shell profile files are not loaded."
         )

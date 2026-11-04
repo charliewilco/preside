@@ -16,8 +16,11 @@ struct ContentView: View {
       List(selection: $store.selection) {
         Section("Sites") {
           ForEach(filteredServices) { service in
-            ServiceRowView(service: service)
-              .tag(service.name)
+            ServiceRowView(
+              service: service,
+              action: store.activeActionName == service.name ? store.activeAction : nil
+            )
+            .tag(service.name)
           }
         }
       }
@@ -104,6 +107,14 @@ struct ContentView: View {
       )
     ) {
       DiagnosticsView(output: store.doctorOutput ?? "")
+    }
+    .sheet(
+      isPresented: Binding(
+        get: { store.logSiteName != nil },
+        set: { if !$0 { store.logSiteName = nil } }
+      )
+    ) {
+      if let name = store.logSiteName { LogsView(store: store, name: name) }
     }
     .frame(minWidth: 840, minHeight: 560)
   }

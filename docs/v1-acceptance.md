@@ -4,20 +4,25 @@ Preside v1 is complete when a user can install the macOS app, add either a stati
 
 ## Evidence recorded 2026-11-04
 
-- Rust checks: format, Clippy with warnings denied, 52 tests pass. Coverage includes concurrent mutations/starts, whole-site update conflicts, startup rollback on persistence failure, early process exit, missing PID recovery, unknown-process refusal, malformed-config stop, static HTTP serving, and traversal rejection.
-- Swift checks: format and 26 tests pass. Coverage includes client timeouts/argument handling, action serialization, error persistence, whole-site lifecycle through the real CLI, and multiline environment preservation.
+- Rust checks: format, Clippy with warnings denied, 60 tests pass. Coverage includes concurrent mutations/starts, whole-site update conflicts, startup rollback on persistence failure, early process exit, missing PID recovery, unknown-process refusal, malformed-config stop, static HTTP serving, and traversal rejection.
+- Swift checks: format and 35 tests pass. Coverage includes client timeouts/argument handling, action serialization, error persistence, whole-site lifecycle through the real CLI, and multiline environment preservation.
 - Packaged development app: ZIP/DMG/checksums generated; ZIP extracted into a separate path containing spaces and launched with isolated HOME and a minimal PATH. GUI edit, start, restart, stop, rename, and removal passed for a static site. HTTP returned the edited folder's content. Removal preserved project files and left the port closed.
 - Earlier GUI checks exercised creation/start/stop and HTTP responses for both static and command-based sites.
 - Release scripts reject missing signing/notarization inputs. The current machine has no Developer ID Application signing identity; distribution execution is not verified.
 
+- Readiness and setup: Rust readiness probes, explicit direct/proxy URLs, and bounded JSON log tails pass tests. Swift tests cover status decoding, live-log recovery and cross-site request races, port suggestions, PATH lookup, and URL-mode compatibility. Existing domain configurations preserve their legacy URL behavior.
+- Launch ownership: a gated exec helper cannot run the service until initial runtime state and PID are durable. Deterministic controller-death tests cover before publication, after publication, partial release, and completed release; ordinary CLI tests cover integrated startup failure and recovery.
+- Native smoke check: the built app displayed Ready for a serving static site, opened expanded logs, automatically displayed newly appended output, copied that output into a disposable form, and exported the expected text through the native Save dialog. The rebuilt viewer was visually verified to open at the left edge and expose log content in the accessibility tree. Add Site reopened by keyboard with the main window closed; Suggest Port populated a port, and entering a domain displayed the direct URL with that port. A status-menu keyboard attempt timed out in the UI-control tool, so direct menu-bar acceptance remains unverified.
+
 ## Remaining release gates
 
-- [ ] Close or otherwise explicitly resolve the parent-death window between spawning a service and recording its initial runtime state. Error-path rollback is tested; abrupt death at every instruction boundary is not covered.
+- [x] Gate service execution on durable runtime publication; test controller death at launch handoff boundaries.
 - [ ] Verify child-process cleanup when a command's original process exits before its descendants.
-- [ ] Expose configured readiness and actionable starting/ready/unhealthy/failed state.
-- [ ] Provide expanded/live logs, copy/export, and an ongoing log-growth policy.
-- [ ] Suggest available ports and assist with missing project tools/Finder PATH differences.
-- [ ] Define direct-domain versus proxied URL behavior; the current domain URL assumes an external proxy.
+- [x] Expose configured readiness and actionable starting/ready/unhealthy/failed state.
+- [x] Provide expanded/live logs with copy/export controls.
+- [ ] Bound ongoing log growth; prelaunch rotation does not cap a continuously running service. Finish VoiceOver acceptance.
+- [x] Suggest available ports and assist with missing project tools/Finder PATH differences.
+- [x] Define explicit direct-domain versus proxied URL behavior while preserving existing domain configurations.
 - [ ] Finish native UI acceptance for menu-bar-only workflows, keyboard operation, VoiceOver, moved folders, failures, and app relaunch.
 - [ ] Run distribution signing, notarization, stapling, and Gatekeeper assessment with real release credentials.
 - [ ] Download/install the actual release on a clean Apple Silicon Mac without developer tools, including the minimum supported macOS version.

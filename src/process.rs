@@ -6,7 +6,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use nix::errno::Errno;
@@ -15,7 +15,7 @@ use nix::unistd::{setsid, Pid};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::PresidePaths;
-use crate::service::{validate_service_name, Readiness, Service, ServiceKind};
+use crate::service::{validate_service_name, Readiness, Service, ServiceKind, UrlMode};
 
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const STARTUP_ALIVE_WAIT: Duration = Duration::from_millis(500);
@@ -24,6 +24,9 @@ const PORT_WAIT_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceStatus {
+    pub phase: String,
+    pub readiness_passed: Option<bool>,
+    pub readiness_message: String,
     pub pid_path: PathBuf,
     pub log_path: PathBuf,
     pub state_path: PathBuf,
@@ -50,6 +53,8 @@ pub struct ServiceState {
     pub port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url_mode: Option<UrlMode>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     pub readiness: Readiness,
@@ -124,10 +129,11 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
         .try_clone()
         .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
 
-    let mut command = service_command(service)?;
+    let target = service_command(service)?;
+    let mut command = crate::launch::command(&target)?;
     command
         .current_dir(&dir)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
 
@@ -171,6 +177,8 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
             service.readiness.as_str()
         ),
     )?;
+
+    crate::launch::release(startup.child)?;
 
     thread::sleep(STARTUP_ALIVE_WAIT);
 
@@ -373,7 +381,18 @@ pub fn service_status(
     let log_modified_unix = file_modified_unix(&log_path)?;
     let recent_log_lines = recent_log_lines(&log_path, 5)?;
 
+    let (phase, readiness_passed, readiness_message) = runtime_readiness(
+        pid.is_some(),
+        process_alive,
+        identity_matches,
+        state.as_ref(),
+        unix_now(),
+    );
+
     Ok(ServiceStatus {
+        phase,
+        readiness_passed,
+        readiness_message,
         pid_path,
         log_path,
         state_path,
@@ -388,6 +407,86 @@ pub fn service_status(
         log_modified_unix,
         recent_log_lines,
     })
+}
+
+fn runtime_readiness(
+    has_runtime: bool,
+    alive: bool,
+    owned: bool,
+    state: Option<&ServiceState>,
+    now: u64,
+) -> (String, Option<bool>, String) {
+    if !has_runtime {
+        return ("stopped".into(), None, "No running service".into());
+    }
+    if !alive {
+        return (
+            "failed".into(),
+            Some(false),
+            "Recorded process has exited".into(),
+        );
+    }
+    let Some(state) = state.filter(|_| owned) else {
+        return (
+            "unknown".into(),
+            None,
+            "Process identity could not be verified".into(),
+        );
+    };
+    let (passed, message) = match state.readiness {
+        Readiness::Process => (true, "Owned process is running".to_string()),
+        Readiness::Port => {
+            let passed = port_listening(state.port);
+            (
+                passed,
+                format!(
+                    "TCP port {} {}",
+                    state.port,
+                    if passed {
+                        "accepts connections"
+                    } else {
+                        "is not accepting connections"
+                    }
+                ),
+            )
+        }
+        Readiness::Http => {
+            let path = state.health_path.as_deref().unwrap_or("/");
+            let passed = http_ready(state.port, path);
+            (
+                passed,
+                format!(
+                    "HTTP localhost:{}{} {}",
+                    state.port,
+                    path,
+                    if passed {
+                        "returned 2xx"
+                    } else {
+                        "did not return 2xx within the probe timeout"
+                    }
+                ),
+            )
+        }
+    };
+    let phase = if passed {
+        "ready"
+    } else if now.saturating_sub(state.started_at_unix) < 10 {
+        "starting"
+    } else {
+        "unhealthy"
+    };
+    (phase.into(), Some(passed), message)
+}
+
+pub fn print_logs_json(service: &str, paths: &PresidePaths, lines: usize) -> Result<()> {
+    validate_service_name(service)?;
+    let path = paths.log_path(service);
+    let lines = bounded_log_lines(&path, lines.min(1000), 1024 * 1024)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({ "path": path, "lines": lines }))?
+    );
+    Ok(())
 }
 
 pub fn print_logs(
@@ -444,6 +543,9 @@ pub fn clear_log(path: &Path) -> Result<()> {
 
 pub fn service_url(service: &Service) -> String {
     match &service.domain {
+        Some(domain) if service.url_mode == Some(UrlMode::Direct) => {
+            format!("http://{domain}:{}", service.port)
+        }
         Some(domain) => format!("http://{domain}"),
         None => format!("http://localhost:{}", service.port),
     }
@@ -471,6 +573,10 @@ pub fn port_listening(port: u16) -> bool {
 }
 
 pub fn recent_log_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
+    bounded_log_lines(path, lines, 16 * 1024)
+}
+
+fn bounded_log_lines(path: &Path, lines: usize, max_bytes: u64) -> Result<Vec<String>> {
     if !path.exists() || lines == 0 {
         return Ok(Vec::new());
     }
@@ -478,7 +584,7 @@ pub fn recent_log_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
     let mut file =
         File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
     let len = file.metadata()?.len();
-    let start = len.saturating_sub(16 * 1024);
+    let start = len.saturating_sub(max_bytes);
     let read_start = start.saturating_sub(1);
     file.seek(SeekFrom::Start(read_start))?;
 
@@ -519,6 +625,7 @@ impl ServiceState {
             command: service.command.clone(),
             port: service.port,
             domain: service.domain.clone(),
+            url_mode: service.url_mode,
             env: service.env.clone(),
             readiness: service.readiness,
             health_path: service.health_path.clone(),
@@ -541,6 +648,7 @@ impl ServiceState {
             && self.command == service.command
             && self.port == service.port
             && self.domain == service.domain
+            && self.url_mode == service.url_mode
             && self.env == service.env
             && self.readiness == service.readiness
             && self.health_path == service.health_path
@@ -788,15 +896,33 @@ fn http_ready(port: u16, path: &str) -> bool {
         return false;
     }
 
-    let mut response = [0; 16];
-    if stream.read(&mut response).is_err() {
-        return false;
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut response = Vec::new();
+    while response.len() < 128 {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        if stream.set_read_timeout(Some(remaining)).is_err() {
+            return false;
+        }
+        let mut byte = [0];
+        if stream.read_exact(&mut byte).is_err() {
+            return false;
+        }
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n") {
+            let line = String::from_utf8_lossy(&response);
+            let mut parts = line.split_whitespace();
+            let protocol = parts.next();
+            let code = parts.next().unwrap_or("");
+            return matches!(protocol, Some("HTTP/1.0" | "HTTP/1.1"))
+                && code.len() == 3
+                && code
+                    .parse::<u16>()
+                    .is_ok_and(|code| (200..300).contains(&code));
+        }
     }
-
-    let response = String::from_utf8_lossy(&response);
-    response.starts_with("HTTP/1.0 2")
-        || response.starts_with("HTTP/1.1 2")
-        || response.starts_with("HTTP/2 2")
+    false
 }
 
 fn append_lifecycle_event(path: &Path, message: &str) -> Result<()> {
@@ -884,9 +1010,96 @@ mod tests {
             command: "true".to_string(),
             port: 8712,
             domain: domain.map(str::to_string),
+            url_mode: None,
             readiness: Readiness::Port,
             health_path: None,
             env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn status_distinguishes_exited_child_from_unverified_live_pid() {
+        let home = TempDir::new().unwrap();
+        let paths = PresidePaths::from_home(home.path());
+        paths.ensure_state_dirs().unwrap();
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        fs::write(paths.pid_path("personal"), child.id().to_string()).unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            service_status("personal", None, None, &paths)
+                .unwrap()
+                .phase,
+            "failed"
+        );
+        fs::write(paths.pid_path("personal"), std::process::id().to_string()).unwrap();
+        let status = service_status("personal", None, None, &paths).unwrap();
+        assert_eq!(status.phase, "unknown");
+        assert_eq!(status.readiness_passed, None);
+    }
+
+    #[test]
+    fn runtime_phases_preserve_identity_and_process_lifecycle() {
+        assert_eq!(
+            runtime_readiness(false, false, false, None, 50).0,
+            "stopped"
+        );
+        assert_eq!(runtime_readiness(true, false, false, None, 50).0, "failed");
+        let unknown = runtime_readiness(true, true, false, None, 50);
+        assert_eq!(unknown.0, "unknown");
+        assert_eq!(unknown.1, None);
+        let mut state = ServiceState::new(
+            &service(None),
+            std::process::id(),
+            Path::new("."),
+            Path::new("log"),
+        );
+        state.readiness = Readiness::Process;
+        assert_eq!(
+            runtime_readiness(true, true, true, Some(&state), unix_now()).0,
+            "ready"
+        );
+        state.readiness = Readiness::Port;
+        state.port = 0;
+        state.started_at_unix = 100;
+        assert_eq!(
+            runtime_readiness(true, true, true, Some(&state), 109).0,
+            "starting"
+        );
+        assert_eq!(
+            runtime_readiness(true, true, true, Some(&state), 110).0,
+            "unhealthy"
+        );
+    }
+
+    #[test]
+    fn http_readiness_requires_successful_complete_status() {
+        for (response, expected) in [
+            ("HTTP/1.1 204 No Content\r\n", true),
+            ("HTTP/1.1 503 Unavailable\r\n", false),
+            ("HTTP/1.1 2broken\r\n", false),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                assert!(stream.read(&mut request).unwrap() > 0);
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let mut state = ServiceState::new(
+                &service(None),
+                std::process::id(),
+                Path::new("."),
+                Path::new("log"),
+            );
+            state.readiness = Readiness::Http;
+            state.health_path = Some("/health".into());
+            state.port = port;
+            state.started_at_unix = 0;
+            let result = runtime_readiness(true, true, true, Some(&state), 100);
+            assert_eq!(result.1, Some(expected));
+            assert_eq!(result.0, if expected { "ready" } else { "unhealthy" });
+            worker.join().unwrap();
         }
     }
 

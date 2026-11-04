@@ -6,6 +6,7 @@ struct AddServiceView: View {
   @Environment(\.dismiss) private var dismiss
   let existing: ServiceEntry?
   @State private var draft: ServiceDraft
+  @State private var portSuggestionMessage: String?
 
   init(store: ServiceStore, existing: ServiceEntry? = nil) {
     self.store = store
@@ -54,9 +55,23 @@ struct AddServiceView: View {
           if !isStatic {
             TextField("Command", text: $draft.command, prompt: Text("npm run dev"))
           }
-          TextField("Port", text: $draft.port, prompt: Text("3000"))
+          HStack {
+            TextField("Port", text: $draft.port, prompt: Text("3000"))
+            Button("Suggest Port") {
+              do {
+                draft.port = String(try SetupAssistance.suggestPort())
+                portSuggestionMessage = "Available now. Preside checks again when the site starts."
+              } catch { portSuggestionMessage = error.localizedDescription }
+            }
+          }
+          if let portSuggestionMessage {
+            Text(portSuggestionMessage).font(.caption).foregroundStyle(.secondary)
+          }
         }
         if !isStatic {
+          DisclosureGroup("Check a development tool") {
+            ToolLookupView(searchPath: store.searchPath)
+          }
           Section("Readiness") {
             Picker("Check", selection: $draft.readiness) {
               Text("Process stays running").tag("process")
@@ -70,11 +85,25 @@ struct AddServiceView: View {
         }
         Section("Optional") {
           TextField("Domain", text: $draft.domain, prompt: Text("my-site.local"))
-          Text(
-            "Domains must already resolve on your Mac. Preside does not configure DNS or a proxy."
-          )
-          .font(.caption)
-          .foregroundStyle(.secondary)
+          if !draft.domain.isEmpty {
+            Picker("Domain URL", selection: $draft.urlMode) {
+              if draft.urlMode == nil {
+                Text("Legacy (no port)").tag(Optional<String>.none)
+              }
+              Text("Direct (include port)").tag(Optional("direct"))
+              Text("Existing proxy (no port)").tag(Optional("proxy"))
+            }
+            Text(
+              draft.urlMode == "direct"
+                ? "Opens http://\(draft.domain):\(draft.port). The domain must already resolve on your Mac."
+                : "Opens http://\(draft.domain). An existing proxy must route this domain to your server’s port."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          }
+          Text("Preside does not configure DNS, a proxy, HTTPS, or /etc/hosts.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
           if !isStatic {
             EnvironmentEditorView(
               variables: Binding(

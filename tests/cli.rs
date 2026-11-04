@@ -517,6 +517,41 @@ fn detached_process_readiness_does_not_require_port() {
         .stdout(predicate::str::contains("[preside]"))
         .stdout(predicate::str::contains("started pid="));
 
+    pp(&home)
+        .args(["status", "personal", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"phase\": \"ready\""));
+    pp(&home)
+        .args(["doctor", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Owned process is running"));
+    set(&home, "personal", "readiness", "http");
+    pp(&home)
+        .args(["status", "personal", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"phase\": \"ready\""))
+        .stdout(predicate::str::contains("\"state_matches_config\": false"));
+
+    let runtime_path = home
+        .path()
+        .join(".local/state/preside/services/personal.toml");
+    let mut runtime: toml::Value =
+        toml::from_str(&fs::read_to_string(&runtime_path).unwrap()).unwrap();
+    runtime["readiness"] = "http".into();
+    runtime["port"] = 0.into();
+    runtime["started_at_unix"] = 0.into();
+    fs::write(&runtime_path, toml::to_string(&runtime).unwrap()).unwrap();
+    pp(&home)
+        .args(["doctor", "personal"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "unhealthy: HTTP localhost:0/ did not return 2xx",
+        ));
+
     pp(&home).args(["stop", "personal"]).assert().success();
 }
 
@@ -1113,4 +1148,37 @@ fn mismatched_runtime_name_without_pid_never_authorizes_signals_or_replacement()
     );
     drop(restore);
     pp(&home).args(["stop", "managed"]).assert().success();
+}
+
+#[test]
+fn json_logs_are_bounded_lossy_and_read_only() {
+    let home = TempDir::new().unwrap();
+    let path = home.path().join(".local/state/preside/logs/personal.log");
+    pp(&home)
+        .args(["logs", "personal", "--json"])
+        .assert()
+        .success();
+    assert!(!path.exists());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = (0..1100)
+        .map(|i| format!("line {i}: {}\n", "x".repeat(30)))
+        .collect::<String>()
+        .into_bytes();
+    bytes.extend_from_slice(b"invalid \xff\n");
+    fs::write(&path, &bytes).unwrap();
+    let output = pp(&home)
+        .args(["logs", "personal", "--json", "--lines", "2000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let lines = value["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1000);
+    assert!(lines[0].as_str().unwrap().starts_with("line 101:"));
+    assert_eq!(lines.last().unwrap(), "invalid \u{fffd}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    pp(&home)
+        .args(["logs", "personal", "--json", "--clear"])
+        .assert()
+        .failure();
 }

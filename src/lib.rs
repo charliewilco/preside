@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+mod launch;
 pub mod paths;
 pub mod process;
 pub mod service;
@@ -17,6 +18,9 @@ use clap_complete::generate;
 
 pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    if let Commands::Launch { command } = &cli.command {
+        return launch::exec(command);
+    }
     if let Commands::ServeStatic { dir, port, domain } = &cli.command {
         static_site::serve(dir, *port, domain.as_deref())?;
         return Ok(ExitCode::SUCCESS);
@@ -47,7 +51,7 @@ pub fn run() -> Result<ExitCode> {
     let mut config = Config::load(&paths.config_path)?;
 
     match cli.command {
-        Commands::ServeStatic { .. } => unreachable!(),
+        Commands::ServeStatic { .. } | Commands::Launch { .. } => unreachable!(),
         Commands::List { json } => {
             commands::list(&config, json)?;
             Ok(ExitCode::SUCCESS)
@@ -59,6 +63,7 @@ pub fn run() -> Result<ExitCode> {
             static_site,
             port,
             domain,
+            url_mode,
             readiness,
             health_path,
             env,
@@ -74,6 +79,7 @@ pub fn run() -> Result<ExitCode> {
                 command,
                 port,
                 domain,
+                url_mode,
                 readiness,
                 health_path,
                 env,
@@ -90,6 +96,7 @@ pub fn run() -> Result<ExitCode> {
             static_site,
             port,
             domain,
+            url_mode,
             readiness,
             health_path,
             env,
@@ -113,6 +120,7 @@ pub fn run() -> Result<ExitCode> {
                 command,
                 port,
                 domain,
+                url_mode,
                 readiness,
                 health_path,
                 env,
@@ -222,8 +230,13 @@ pub fn run() -> Result<ExitCode> {
             lines,
             follow,
             clear,
+            json,
         } => {
-            process::print_logs(&service, &paths, lines, follow, clear)?;
+            if json {
+                process::print_logs_json(&service, &paths, lines)?;
+            } else {
+                process::print_logs(&service, &paths, lines, follow, clear)?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         Commands::Status { service, json } => {
@@ -367,6 +380,8 @@ mod commands {
                 "stopped"
             }
         );
+        println!("  phase: {}", status.phase);
+        println!("  readiness: {}", status.readiness_message);
         println!(
             "  listening: {}",
             status
@@ -678,6 +693,20 @@ mod commands {
                 service_report.checks.push(ok("state", "ok"));
             } else {
                 service_report.checks.push(ok("state", "none"));
+            }
+
+            if let Some(passed) = status.readiness_passed.filter(|_| status.identity_matches) {
+                if passed {
+                    service_report
+                        .checks
+                        .push(ok("readiness", &status.readiness_message));
+                } else {
+                    report.issues += 1;
+                    service_report.checks.push(issue(
+                        "readiness",
+                        format!("{}: {}", status.phase, status.readiness_message),
+                    ));
+                }
             }
 
             match status.listening {

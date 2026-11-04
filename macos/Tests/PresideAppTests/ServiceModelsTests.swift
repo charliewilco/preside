@@ -76,7 +76,8 @@ struct ServiceModelsTests {
     #expect(
       draft.arguments == [
         "add", "--dir", draft.dir, "--command", draft.command, "--port", "8123",
-        "--readiness", "port", "--env", "TOKEN=a=b;$(touch unwanted)", "--env", "EMPTY=",
+        "--readiness", "port", "--url-mode", "direct", "--env", "TOKEN=a=b;$(touch unwanted)",
+        "--env", "EMPTY=",
         "--", "app",
       ])
     #expect(ServiceAction.start.arguments(name: "app") == ["run", "--detach", "--", "app"])
@@ -127,7 +128,10 @@ struct ServiceModelsTests {
     draft.dir = "/tmp/site with spaces;$(touch unwanted)"
     #expect(draft.validationError == nil)
     #expect(
-      draft.arguments == ["add", "--dir", draft.dir, "--port", "8123", "--static", "--", "app"])
+      draft.arguments == [
+        "add", "--dir", draft.dir, "--port", "8123", "--static", "--url-mode", "direct", "--",
+        "app",
+      ])
     draft.kind = "command"
     #expect(draft.validationError != nil)
   }
@@ -198,6 +202,56 @@ struct ServiceModelsTests {
     let expected = try JSONDecoder().decode(
       ServiceConfig.self, from: Data(update[expectedIndex + 1].utf8))
     #expect(expected.env?["OTHER"] == "old")
+  }
+
+  @Test(arguments: [
+    ("starting", "Starting"), ("ready", "Ready"), ("unhealthy", "Unhealthy"),
+    ("failed", "Failed"), ("unknown", "Unknown process"), ("future-phase", "Running"),
+  ])
+  func runtimePhasesPreserveIndependentProcessControls(phase: String, label: String) {
+    var service = entry(alive: true, identity: true)
+    service.report?.status.phase = phase
+    #expect(service.stateLabel == label)
+    #expect(service.canStop)
+    #expect(!service.canStart)
+    service.report?.status.identityMatches = false
+    #expect(service.stateLabel == "Unknown process")
+    #expect(!service.canStop)
+  }
+
+  @Test func readinessDecodesAndLegacyStatusRemainsCompatible() throws {
+    let json =
+      #"{"process_alive":true,"identity_matches":true,"recent_log_lines":[],"log_path":"/tmp/app.log","phase":"unhealthy","readiness_passed":false,"readiness_message":"HTTP returned 503"}"#
+    let status = try decoder().decode(RuntimeStatus.self, from: Data(json.utf8))
+    #expect(status.phase == "unhealthy")
+    #expect(status.readinessPassed == false)
+    #expect(status.readinessMessage == "HTTP returned 503")
+    #expect(entry(alive: true, identity: true).report?.status.phase == nil)
+    #expect(entry(alive: true, identity: true).stateLabel == "Running")
+  }
+
+  @Test(arguments: ["command", "static"])
+  func urlModeDefaultsAndLegacyEditsPreserveIntent(kind: String) throws {
+    var fresh = validDraft()
+    fresh.kind = kind
+    #expect(fresh.urlMode == "direct")
+    let index = try #require(fresh.arguments.firstIndex(of: "--url-mode"))
+    #expect(fresh.arguments[index + 1] == "direct")
+    let legacy = ServiceEntry(
+      name: "legacy",
+      config: ServiceConfig(dir: "/tmp/site", command: "run", port: 8123, kind: kind))
+    var edited = ServiceDraft(entry: legacy)
+    #expect(edited.urlMode == nil)
+    #expect(!edited.arguments.contains("--url-mode"))
+    let update = try edited.updateArguments(name: legacy.name)
+    let expectedIndex = try #require(update.firstIndex(of: "--expected-config"))
+    let snapshot =
+      try JSONSerialization.jsonObject(with: Data(update[expectedIndex + 1].utf8)) as? [String: Any]
+    #expect(snapshot?["url_mode"] == nil)
+    edited.urlMode = "proxy"
+    let changed = try edited.updateArguments(name: legacy.name)
+    let modeIndex = try #require(changed.firstIndex(of: "--url-mode"))
+    #expect(changed[modeIndex + 1] == "proxy")
   }
 
   private func validDraft() -> ServiceDraft {

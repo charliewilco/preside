@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::service::{
     validate_service_name, Readiness, Service, ServiceConfig, ServiceError, ServiceField,
-    ServiceKind,
+    ServiceKind, UrlMode,
 };
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -74,6 +74,7 @@ impl Config {
         let mut config = ServiceConfig::default();
         config.set(ServiceField::parse("dir")?, &service.dir)?;
         config.kind = service.kind;
+        config.url_mode = service.url_mode;
         if let Some(command) = &service.command {
             config.set(ServiceField::parse("command")?, command)?;
         }
@@ -162,6 +163,7 @@ pub struct AddService {
     pub kind: ServiceKind,
     pub port: u16,
     pub domain: Option<String>,
+    pub url_mode: Option<UrlMode>,
     pub readiness: Option<Readiness>,
     pub health_path: Option<String>,
     pub env: Vec<String>,

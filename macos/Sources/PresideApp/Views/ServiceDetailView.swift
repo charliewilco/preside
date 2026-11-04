@@ -8,6 +8,13 @@ struct ServiceDetailView: View {
   @State private var showingRemoveConfirmation = false
   @State private var removalSite: ServiceEntry?
 
+  private var status: SiteStatusPresentation {
+    SiteStatusPresentation(
+      service: service,
+      action: store.activeActionName == service.name ? store.activeAction : nil
+    )
+  }
+
   private var canManage: Bool {
     guard service.error == nil, let status = service.report?.status else { return false }
     return !status.processAlive || status.identityMatches
@@ -23,8 +30,8 @@ struct ServiceDetailView: View {
         HStack(alignment: .top) {
           VStack(alignment: .leading, spacing: 6) {
             Text(service.name).font(.largeTitle.bold())
-            Label(service.stateLabel, systemImage: service.canStop ? "play.circle.fill" : "circle")
-              .foregroundStyle(service.canStop ? Color.green : Color.secondary)
+            Label(status.title, systemImage: status.symbol)
+              .foregroundStyle(status.color)
           }
           Spacer()
           Menu("Manage Site", systemImage: "ellipsis.circle") {
@@ -104,6 +111,12 @@ struct ServiceDetailView: View {
           }
         }
 
+        if let message = service.report?.status.readinessMessage {
+          Label(message, systemImage: status.symbol)
+            .foregroundStyle(status.color)
+            .textSelection(.enabled)
+        }
+
         GroupBox {
           Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 12) {
             GridRow {
@@ -131,10 +144,14 @@ struct ServiceDetailView: View {
               }
             }
             GridRow {
-              Text("Readiness mode").foregroundStyle(.secondary)
+              Text("Configured readiness").foregroundStyle(.secondary)
               Text(service.config.readiness ?? "port")
             }
             if let status = service.report?.status {
+              GridRow {
+                Text("Readiness check").foregroundStyle(.secondary)
+                Text(status.readinessPassed.map { $0 ? "Passing" : "Not passing" } ?? "Not checked")
+              }
               GridRow {
                 Text("Port listening").foregroundStyle(.secondary)
                 Text(status.listening.map { $0 ? "Yes" : "No" } ?? "Unknown")
@@ -157,6 +174,11 @@ struct ServiceDetailView: View {
         HStack {
           Text("Recent Logs").font(.headline)
           Spacer()
+          Button("View Logs…", systemImage: "text.alignleft") {
+            store.logOutput = ""
+            store.logError = nil
+            store.logSiteName = service.name
+          }
           Button("Diagnose", systemImage: "stethoscope") {
             Task { await store.diagnose(name: service.name) }
           }

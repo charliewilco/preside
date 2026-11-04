@@ -124,6 +124,7 @@ pp __complete services
 pp open <service>
 pp stop <service>
 pp logs <service> [--lines <n>|--follow|--clear]
+pp logs <service> --json [--lines <n>]
 pp status <service>
 pp status <service> --json
 ```
@@ -169,6 +170,12 @@ Detached service state is stored under:
 ```txt
 ~/.local/state/preside/
 ```
+
+Domain URLs have an explicit `url_mode`: `direct` opens `http://domain:port`, and `proxy` opens `http://domain` for an existing reverse proxy. Set it with `pp set <service> url_mode direct` or `--url-mode direct|proxy` on add/update. With no domain, both modes open `http://localhost:port`. Existing configurations without `url_mode` retain their historical no-port domain URL; editing them in the app preserves that behavior until you choose a mode. New app-created sites default to direct. Preside does not configure DNS, proxies, HTTPS, or `/etc/hosts`.
+
+Status includes a readiness phase (`stopped`, `starting`, `ready`, `unhealthy`, `failed`, or `unknown`). Readiness probes use the running configuration; pending configuration changes remain separately visible as drift. HTTP readiness requires a 2xx response, while port readiness only checks TCP connectivity. An unready process has a 10-second starting window before becoming unhealthy. Unverified process identities remain unknown.
+
+`pp logs <service> --json` returns `{path, lines}` without creating or modifying logs. JSON snapshots retain at most 1,000 lines from the last 1 MiB, decoding invalid UTF-8 lossily; text output keeps its existing behavior. JSON mode cannot be combined with follow or clear.
 
 PID files live in `pids/`, logs live in `logs/`, and runtime identity files live in `services/`. See [docs/process-model.md](docs/process-model.md).
 

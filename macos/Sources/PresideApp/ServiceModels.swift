@@ -5,6 +5,7 @@ struct ServiceConfig: Codable, Sendable {
   var command: String?
   var port: Int?
   var domain: String?
+  var urlMode: String? = nil
   var readiness: String?
   var healthPath: String?
   var env: [String: String]?
@@ -25,6 +26,9 @@ struct RuntimeStatus: Decodable, Sendable {
   var url: String?
   var recentLogLines: [String]
   var logPath: String
+  var phase: String?
+  var readinessPassed: Bool?
+  var readinessMessage: String?
 }
 
 struct ServiceEntry: Identifiable, Sendable {
@@ -37,6 +41,16 @@ struct ServiceEntry: Identifiable, Sendable {
   var stateLabel: String {
     guard error == nil, let report else { return "Unavailable" }
     if report.status.processAlive && !report.status.identityMatches { return "Unknown process" }
+    if let phase = report.status.phase {
+      switch phase {
+      case "starting": return "Starting"
+      case "ready": return "Ready"
+      case "unhealthy": return "Unhealthy"
+      case "failed": return "Failed"
+      case "unknown": return "Unknown process"
+      default: break
+      }
+    }
     if report.status.identityMatches { return "Running" }
     if !report.missingFields.isEmpty { return "Incomplete" }
     return "Stopped"
@@ -77,6 +91,7 @@ struct ServiceDraft {
   var command = ""
   var port = ""
   var domain = ""
+  var urlMode: String? = "direct"
   var readiness = "port"
   var healthPath = "/"
   var environment = ""
@@ -139,6 +154,7 @@ struct ServiceDraft {
     if kind == "static" {
       var result = ["add", "--dir", dir, "--port", port, "--static"]
       if !domain.isEmpty { result += ["--domain", domain] }
+      if let urlMode { result += ["--url-mode", urlMode] }
       if originalConfig?.kind == "static" {
         if let readiness = originalConfig?.readiness { result += ["--readiness", readiness] }
         if let healthPath = originalConfig?.healthPath { result += ["--health-path", healthPath] }
@@ -152,6 +168,7 @@ struct ServiceDraft {
       "add", "--dir", dir, "--command", command, "--port", port, "--readiness", readiness,
     ]
     if !domain.isEmpty { result += ["--domain", domain] }
+    if let urlMode { result += ["--url-mode", urlMode] }
     if readiness == "http" {
       result += ["--health-path", healthPath]
     } else if let path = originalConfig?.healthPath {
@@ -193,6 +210,7 @@ extension ServiceDraft {
     command = entry.config.command ?? ""
     port = entry.config.port.map(String.init) ?? ""
     domain = entry.config.domain ?? ""
+    urlMode = entry.config.urlMode
     readiness = entry.config.readiness ?? "port"
     healthPath = entry.config.healthPath ?? "/"
     kind = entry.config.kind ?? "command"

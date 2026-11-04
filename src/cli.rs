@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
-use crate::service::Readiness;
+use crate::service::{Readiness, UrlMode};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -16,6 +16,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(name = "__launch", hide = true)]
+    Launch {
+        #[arg(last = true, required = true)]
+        command: Vec<std::ffi::OsString>,
+    },
     #[command(name = "__serve-static", hide = true)]
     ServeStatic {
         #[arg(long)]
@@ -46,6 +51,8 @@ pub enum Commands {
         #[arg(long)]
         domain: Option<String>,
         #[arg(long)]
+        url_mode: Option<UrlMode>,
+        #[arg(long)]
         readiness: Option<Readiness>,
         #[arg(long = "health-path")]
         health_path: Option<String>,
@@ -70,6 +77,8 @@ pub enum Commands {
         port: u16,
         #[arg(long)]
         domain: Option<String>,
+        #[arg(long)]
+        url_mode: Option<UrlMode>,
         #[arg(long)]
         readiness: Option<Readiness>,
         #[arg(long = "health-path")]
@@ -147,6 +156,8 @@ pub enum Commands {
         follow: bool,
         #[arg(long)]
         clear: bool,
+        #[arg(long, conflicts_with_all = ["follow", "clear"])]
+        json: bool,
     },
     Status {
         service: String,

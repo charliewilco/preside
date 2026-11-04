@@ -18,7 +18,10 @@ cargo build --release --locked
 swift build --package-path macos -c release
 bin_dir="$(swift build --package-path macos -c release --show-bin-path)"
 version="$(cargo metadata --locked --no-deps --format-version 1 | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
-app="$(pwd)/dist/Preside.app"
+destination="$(pwd)/dist/Preside.app"
+staging="$(mktemp -d "${TMPDIR:-/tmp}/preside-app-build.XXXXXX")"
+trap 'rm -rf "$staging"' EXIT
+app="$staging/Preside.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin_dir/Preside" "$app/Contents/MacOS/Preside"
 cp target/release/pp "$app/Contents/Resources/pp"
@@ -46,4 +49,12 @@ else
   codesign --force --sign - "$app"
 fi
 codesign --verify --deep --strict "$app"
-printf 'Built %s (%s, %s)\n' "$app" "$version" "$mode"
+mkdir -p "$(dirname "$destination")"
+if [[ -e "$destination" ]]; then
+  mv "$destination" "$staging/previous.app"
+fi
+ditto --norsrc "$app" "$destination"
+xattr -dr com.apple.FinderInfo "$destination" 2>/dev/null || true
+xattr -dr com.apple.ResourceFork "$destination" 2>/dev/null || true
+codesign --verify --deep --strict "$destination"
+printf 'Built %s (%s, %s)\n' "$destination" "$version" "$mode"
