@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::service::{
     validate_service_name, Readiness, Service, ServiceConfig, ServiceError, ServiceField,
+    ServiceKind, UrlMode,
 };
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -35,7 +36,7 @@ impl Config {
         }
 
         let contents = toml::to_string_pretty(self).context("failed to serialize config")?;
-        fs::write(path, contents)
+        crate::storage::atomic_write(path, contents.as_bytes())
             .with_context(|| format!("failed to write config at {}", path.display()))
     }
 
@@ -54,9 +55,32 @@ impl Config {
             return Err(ServiceError::ServiceExists(service.name).into());
         }
 
+        let config = Self::validated_service(&service)?;
+        self.services.insert(service.name, config);
+        Ok(())
+    }
+
+    pub fn update_service(&mut self, service: AddService) -> Result<()> {
+        validate_service_name(&service.name)?;
+        if !self.services.contains_key(&service.name) {
+            return Err(ServiceError::MissingService(service.name).into());
+        }
+        let config = Self::validated_service(&service)?;
+        self.services.insert(service.name, config);
+        Ok(())
+    }
+
+    fn validated_service(service: &AddService) -> Result<ServiceConfig> {
         let mut config = ServiceConfig::default();
         config.set(ServiceField::parse("dir")?, &service.dir)?;
-        config.set(ServiceField::parse("command")?, &service.command)?;
+        config.kind = service.kind;
+        config.url_mode = service.url_mode;
+        if let Some(command) = &service.command {
+            config.set(ServiceField::parse("command")?, command)?;
+        }
+        if service.kind == ServiceKind::Static && service.port == 0 {
+            anyhow::bail!("static sites require a port between 1 and 65535");
+        }
         config.set(ServiceField::parse("port")?, &service.port.to_string())?;
 
         if let Some(domain) = &service.domain {
@@ -71,16 +95,15 @@ impl Config {
             config.set(ServiceField::parse("health_path")?, health_path)?;
         }
 
-        for pair in service.env {
+        for pair in &service.env {
             let Some((key, value)) = pair.split_once('=') else {
-                return Err(ServiceError::InvalidEnvAssignment(pair).into());
+                return Err(ServiceError::InvalidEnvAssignment(pair.clone()).into());
             };
             config.set(ServiceField::parse(&format!("env.{key}"))?, value)?;
         }
 
-        self.services.insert(service.name, config);
-
-        Ok(())
+        config.validate(&service.name)?;
+        Ok(config)
     }
 
     pub fn unset_field(&mut self, service: &str, field: &str) -> Result<()> {
@@ -136,9 +159,11 @@ impl Config {
 pub struct AddService {
     pub name: String,
     pub dir: String,
-    pub command: String,
+    pub command: Option<String>,
+    pub kind: ServiceKind,
     pub port: u16,
     pub domain: Option<String>,
+    pub url_mode: Option<UrlMode>,
     pub readiness: Option<Readiness>,
     pub health_path: Option<String>,
     pub env: Vec<String>,

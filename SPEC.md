@@ -27,6 +27,8 @@ Preside should make local dev services feel like named places on my machine.
 
 ## Roadmap
 
+The first macOS app is now implemented ahead of proxy/TLS work. See [docs/macos.md](docs/macos.md) for its scope and build instructions. The v1 non-goals below describe the original CLI milestone.
+
 ### v1 — Named services
 
 Preside runs named services.

@@ -5,8 +5,10 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
+    #[serde(default)]
+    pub kind: ServiceKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -15,6 +17,8 @@ pub struct ServiceConfig {
     pub port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url_mode: Option<UrlMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<Readiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,14 +29,31 @@ pub struct ServiceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
+    pub kind: ServiceKind,
     pub name: String,
     pub dir: String,
     pub command: String,
     pub port: u16,
     pub domain: Option<String>,
+    pub url_mode: Option<UrlMode>,
     pub readiness: Readiness,
     pub health_path: Option<String>,
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum UrlMode {
+    Direct,
+    Proxy,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceKind {
+    #[default]
+    Command,
+    Static,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -57,9 +78,11 @@ impl Readiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceField {
     Dir,
+    Kind,
     Command,
     Port,
     Domain,
+    UrlMode,
     Readiness,
     HealthPath,
     Env,
@@ -68,10 +91,12 @@ pub enum ServiceField {
 impl ServiceField {
     pub fn parse(value: &str) -> Result<ParsedServiceField, ServiceError> {
         match value {
+            "kind" => Ok(ParsedServiceField::Scalar(Self::Kind)),
             "dir" => Ok(ParsedServiceField::Scalar(Self::Dir)),
             "command" => Ok(ParsedServiceField::Scalar(Self::Command)),
             "port" => Ok(ParsedServiceField::Scalar(Self::Port)),
             "domain" => Ok(ParsedServiceField::Scalar(Self::Domain)),
+            "url_mode" | "url-mode" => Ok(ParsedServiceField::Scalar(Self::UrlMode)),
             "readiness" => Ok(ParsedServiceField::Scalar(Self::Readiness)),
             "health_path" | "health-path" => Ok(ParsedServiceField::Scalar(Self::HealthPath)),
             field if field.starts_with("env.") => {
@@ -93,6 +118,13 @@ pub enum ParsedServiceField {
 impl ServiceConfig {
     pub fn set(&mut self, field: ParsedServiceField, value: &str) -> Result<(), ServiceError> {
         match field {
+            ParsedServiceField::Scalar(ServiceField::Kind) => {
+                self.kind = match value {
+                    "command" => ServiceKind::Command,
+                    "static" => ServiceKind::Static,
+                    _ => return Err(ServiceError::InvalidKind(value.to_string())),
+                };
+            }
             ParsedServiceField::Scalar(ServiceField::Dir) => {
                 validate_required_value("dir", value)?;
                 self.dir = Some(value.to_string());
@@ -112,6 +144,13 @@ impl ServiceConfig {
                 validate_domain(value)?;
                 self.domain = Some(value.to_string());
             }
+            ParsedServiceField::Scalar(ServiceField::UrlMode) => {
+                self.url_mode = Some(match value {
+                    "direct" => UrlMode::Direct,
+                    "proxy" => UrlMode::Proxy,
+                    _ => return Err(ServiceError::InvalidUrlMode(value.to_string())),
+                });
+            }
             ParsedServiceField::Scalar(ServiceField::Readiness) => {
                 self.readiness = Some(parse_readiness(value)?);
             }
@@ -130,10 +169,12 @@ impl ServiceConfig {
 
     pub fn unset(&mut self, field: ParsedServiceField) {
         match field {
+            ParsedServiceField::Scalar(ServiceField::Kind) => self.kind = ServiceKind::Command,
             ParsedServiceField::Scalar(ServiceField::Dir) => self.dir = None,
             ParsedServiceField::Scalar(ServiceField::Command) => self.command = None,
             ParsedServiceField::Scalar(ServiceField::Port) => self.port = None,
             ParsedServiceField::Scalar(ServiceField::Domain) => self.domain = None,
+            ParsedServiceField::Scalar(ServiceField::UrlMode) => self.url_mode = None,
             ParsedServiceField::Scalar(ServiceField::Readiness) => self.readiness = None,
             ParsedServiceField::Scalar(ServiceField::HealthPath) => self.health_path = None,
             ParsedServiceField::Scalar(ServiceField::Env) => unreachable!("env requires a key"),
@@ -145,21 +186,29 @@ impl ServiceConfig {
 
     pub fn validate(&self, name: &str) -> Result<Service, ServiceError> {
         validate_service_name(name)?;
+        if self.kind == ServiceKind::Static && self.port == Some(0) {
+            return Err(ServiceError::InvalidPort("0 (static site)".to_string()));
+        }
 
         Ok(Service {
+            kind: self.kind,
             name: name.to_string(),
             dir: self
                 .dir
                 .clone()
                 .ok_or_else(|| ServiceError::MissingField(name.to_string(), "dir"))?,
-            command: self
-                .command
-                .clone()
-                .ok_or_else(|| ServiceError::MissingField(name.to_string(), "command"))?,
+            command: match self.kind {
+                ServiceKind::Static => String::new(),
+                ServiceKind::Command => self
+                    .command
+                    .clone()
+                    .ok_or_else(|| ServiceError::MissingField(name.to_string(), "command"))?,
+            },
             port: self
                 .port
                 .ok_or_else(|| ServiceError::MissingField(name.to_string(), "port"))?,
             domain: self.domain.clone(),
+            url_mode: self.url_mode,
             readiness: self.readiness.unwrap_or_default(),
             health_path: self.health_path.clone(),
             env: self.env.clone(),
@@ -246,6 +295,8 @@ fn validate_health_path(path: &str) -> Result<(), ServiceError> {
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error("invalid service kind '{0}'. expected command or static")]
+    InvalidKind(String),
     #[error("service '{0}' is not configured")]
     MissingService(String),
     #[error("service '{0}' already exists")]
@@ -254,12 +305,14 @@ pub enum ServiceError {
     MissingField(String, &'static str),
     #[error("invalid service name '{0}'. use letters, numbers, dots, dashes, or underscores, and start with a letter or number")]
     InvalidName(String),
-    #[error("invalid field '{0}'. expected one of: dir, command, port, domain, readiness, health_path, env.<KEY>")]
+    #[error("invalid field '{0}'. expected one of: kind, dir, command, port, domain, url_mode, readiness, health_path, env.<KEY>")]
     InvalidField(String),
     #[error("invalid port '{0}'. expected a number from 0 to 65535")]
     InvalidPort(String),
     #[error("invalid domain '{0}'. use a host name without a scheme, path, spaces, or port")]
     InvalidDomain(String),
+    #[error("invalid URL mode '{0}'. expected direct or proxy")]
+    InvalidUrlMode(String),
     #[error("'{0}' cannot be empty")]
     EmptyValue(&'static str),
     #[error("invalid env key '{0}'. use letters, numbers, and underscores, and start with a letter or underscore")]

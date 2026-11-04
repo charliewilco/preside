@@ -429,6 +429,29 @@ fn completions_print_shell_completion_script() {
 }
 
 #[test]
+fn status_json_tolerates_non_utf8_service_output() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    configure_service(&home, "personal", dir.path().to_str().unwrap(), "true");
+    let log_dir = home.path().join(".local/state/preside/logs");
+    fs::create_dir_all(&log_dir).unwrap();
+    fs::write(log_dir.join("personal.log"), b"output \xff\nready\n").unwrap();
+
+    let output = pp(&home)
+        .args(["status", "personal", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        report["status"]["recent_log_lines"],
+        serde_json::json!(["output \u{fffd}", "ready"])
+    );
+}
+
+#[test]
 fn detached_run_status_logs_and_stop_work() {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
@@ -494,6 +517,41 @@ fn detached_process_readiness_does_not_require_port() {
         .stdout(predicate::str::contains("[preside]"))
         .stdout(predicate::str::contains("started pid="));
 
+    pp(&home)
+        .args(["status", "personal", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"phase\": \"ready\""));
+    pp(&home)
+        .args(["doctor", "personal"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Owned process is running"));
+    set(&home, "personal", "readiness", "http");
+    pp(&home)
+        .args(["status", "personal", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"phase\": \"ready\""))
+        .stdout(predicate::str::contains("\"state_matches_config\": false"));
+
+    let runtime_path = home
+        .path()
+        .join(".local/state/preside/services/personal.toml");
+    let mut runtime: toml::Value =
+        toml::from_str(&fs::read_to_string(&runtime_path).unwrap()).unwrap();
+    runtime["readiness"] = "http".into();
+    runtime["port"] = 0.into();
+    runtime["started_at_unix"] = 0.into();
+    fs::write(&runtime_path, toml::to_string(&runtime).unwrap()).unwrap();
+    pp(&home)
+        .args(["doctor", "personal"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "unhealthy: HTTP localhost:0/ did not return 2xx",
+        ));
+
     pp(&home).args(["stop", "personal"]).assert().success();
 }
 
@@ -535,4 +593,592 @@ fn detached_run_refuses_occupied_port() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("already appears to be in use"));
+}
+
+#[test]
+fn static_site_rejects_command_and_zero_port() {
+    let home = TempDir::new().unwrap();
+    for extra in [vec!["--command", "echo wrong"], vec!["--port", "0"]] {
+        let mut args = vec!["add", "site", "--dir", "/tmp", "--static"];
+        if extra[0] != "--port" {
+            args.extend(["--port", "8080"]);
+        }
+        args.extend(extra);
+        pp(&home).args(args).assert().failure();
+    }
+    pp(&home)
+        .args(["add", "site", "--dir", "/tmp", "--static", "--port", "8080"])
+        .assert()
+        .success();
+    set(&home, "site", "port", "0");
+    pp(&home)
+        .args(["run", "site", "--detach"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("static site"));
+}
+
+#[test]
+fn static_site_lifecycle_serves_assets_and_rejects_escape_paths() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::os::unix::fs::symlink;
+    use std::time::Duration;
+
+    let home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let root = files.path().join("site with spaces");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::create_dir_all(root.join("empty")).unwrap();
+    fs::write(root.join("index.html"), "<h1>Preside static</h1>").unwrap();
+    fs::write(root.join("app.js"), "console.log('static');").unwrap();
+    fs::write(root.join("icon.svg"), "<svg/>").unwrap();
+    fs::write(root.join("what?#.txt"), "encoded filename").unwrap();
+    fs::write(root.join("nested/index.html"), "nested page").unwrap();
+    fs::write(root.join(".env"), "PRIVATE_VALUE").unwrap();
+    fs::write(files.path().join("secret.txt"), "OUTSIDE_ROOT").unwrap();
+    symlink(files.path().join("secret.txt"), root.join("escape.txt")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    pp(&home)
+        .args([
+            "add",
+            "static-site",
+            "--dir",
+            root.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+            "--static",
+            "--domain",
+            "site.example",
+            "--readiness",
+            "http",
+        ])
+        .assert()
+        .success();
+    let result = pp(&home)
+        .args(["status", "static-site", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(status["service"]["kind"], "static");
+    assert_eq!(status["missing_fields"], serde_json::json!([]));
+    assert!(status["service"].get("command").is_none());
+    pp(&home)
+        .args(["run", "static-site", "--detach"])
+        .assert()
+        .success();
+    struct StopOnDrop<'a>(&'a TempDir);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = pp(self.0).args(["stop", "static-site"]).output();
+        }
+    }
+    let _cleanup = StopOnDrop(&home);
+    let request = |method: &str, path: &str, host: &str| {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut result = String::new();
+        stream.read_to_string(&mut result).unwrap();
+        result
+    };
+    let host = format!("localhost:{port}");
+    let index = request("GET", "/", &host);
+    assert!(index.starts_with("HTTP/1.1 200"), "{index}");
+    assert!(index.contains("text/html"));
+    assert!(request("GET", "/", "site.example").starts_with("HTTP/1.1 200"));
+    assert!(index.ends_with("<h1>Preside static</h1>"));
+    let asset = request("GET", "/app.js?cache=1", &host);
+    assert!(asset.starts_with("HTTP/1.1 200"));
+    assert!(asset.contains("javascript"));
+    assert!(request("GET", "/icon.svg", &host).contains("image/svg+xml"));
+    assert!(request("GET", "/what%3F%23.txt", &host).ends_with("encoded filename"));
+    let head = request("HEAD", "/", &host);
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(head.ends_with("\r\n\r\n"));
+    assert!(request("GET", "/nested", &host).starts_with("HTTP/1.1 301"));
+    assert!(request("GET", "/nested?query=1", &host).contains("Location: /nested/?query=1"));
+    assert!(request("GET", "/nested/", &host).ends_with("nested page"));
+    for path in ["/missing", "/empty/"] {
+        assert!(request("GET", path, &host).starts_with("HTTP/1.1 404"));
+    }
+    for path in [
+        "/../secret.txt",
+        "/%2e%2e/secret.txt",
+        "/%2e%2e%2fsecret.txt",
+        "/escape.txt",
+        "/.env",
+    ] {
+        let response = request("GET", path, &host);
+        assert!(response.starts_with("HTTP/1.1 403"), "{path}: {response}");
+        assert!(!response.contains("OUTSIDE_ROOT"));
+        assert!(!response.contains("PRIVATE_VALUE"));
+    }
+    assert!(request("POST", "/", &host).starts_with("HTTP/1.1 405"));
+    assert!(request("GET", "/", "untrusted.example").starts_with("HTTP/1.1 403"));
+    pp(&home).args(["stop", "static-site"]).assert().success();
+    let result = pp(&home)
+        .args(["status", "static-site", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(status["status"]["process_alive"], false);
+    assert_eq!(status["status"]["listening"], false);
+}
+
+struct StopOnDrop<'a> {
+    home: &'a TempDir,
+    name: &'a str,
+}
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = pp(self.home).args(["stop", self.name]).output();
+    }
+}
+
+fn long_running_service(home: &TempDir, dir: &TempDir) {
+    pp(home)
+        .args([
+            "add",
+            "managed",
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--command",
+            "exec /bin/sleep 60",
+            "--port",
+            "49001",
+            "--readiness",
+            "process",
+        ])
+        .assert()
+        .success();
+}
+
+fn status_json(home: &TempDir, name: &str) -> serde_json::Value {
+    let output = pp(home).args(["status", name, "--json"]).output().unwrap();
+    assert!(output.status.success());
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn concurrent_config_updates_do_not_lose_sites_or_fields() {
+    let home = TempDir::new().unwrap();
+    let binary = assert_cmd::cargo::cargo_bin("pp");
+    let mut children = Vec::new();
+    for index in 0..12 {
+        children.push(
+            std::process::Command::new(&binary)
+                .env("HOME", home.path())
+                .args([
+                    "set",
+                    "shared",
+                    &format!("env.FIELD_{index}"),
+                    &index.to_string(),
+                ])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    let output = pp(&home).args(["list", "--json"]).output().unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(config["shared"]["env"].as_object().unwrap().len(), 12);
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = fs::metadata(home.path().join(".config/preside/config.toml"))
+        .unwrap()
+        .permissions();
+    assert_eq!(permissions.mode() & 0o777, 0o600);
+}
+
+#[test]
+fn concurrent_starts_create_one_managed_process() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "managed",
+    };
+    let binary = assert_cmd::cargo::cargo_bin("pp");
+    let mut children = Vec::new();
+    for _ in 0..4 {
+        children.push(
+            std::process::Command::new(&binary)
+                .env("HOME", home.path())
+                .args(["run", "managed", "--detach"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    let outputs: Vec<_> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap())
+        .collect();
+    assert!(outputs.iter().all(|output| output.status.success()));
+    assert_eq!(
+        outputs
+            .iter()
+            .filter(|output| String::from_utf8_lossy(&output.stdout).starts_with("started managed"))
+            .count(),
+        1
+    );
+    assert!(status_json(&home, "managed")["status"]["identity_matches"]
+        .as_bool()
+        .unwrap());
+}
+
+#[test]
+fn update_replaces_whole_configuration_and_running_site_requires_restart() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    set(&home, "managed", "env.OLD", "old");
+    set(&home, "managed", "domain", "old.local");
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .success();
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "managed",
+    };
+    let before = status_json(&home, "managed");
+    pp(&home)
+        .args([
+            "update",
+            "managed",
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--command",
+            "exec /bin/sleep 90",
+            "--port",
+            "49002",
+            "--readiness",
+            "process",
+            "--env",
+            "NEW=new",
+        ])
+        .assert()
+        .success();
+    let after = status_json(&home, "managed");
+    assert_eq!(before["status"]["pid"], after["status"]["pid"]);
+    assert_eq!(after["status"]["state_matches_config"], false);
+    assert_eq!(after["service"]["env"], serde_json::json!({"NEW": "new"}));
+    assert!(after["service"].get("domain").is_none());
+    pp(&home).args(["restart", "managed"]).assert().success();
+    let restarted = status_json(&home, "managed");
+    assert_ne!(before["status"]["pid"], restarted["status"]["pid"]);
+    assert_eq!(restarted["status"]["state_matches_config"], true);
+}
+
+#[test]
+fn rename_and_remove_require_stopped_site() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "managed",
+    };
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .success();
+    pp(&home)
+        .args(["rename", "managed", "renamed"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stop the site"));
+    pp(&home)
+        .args(["remove", "managed"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("stop the site"));
+    assert_eq!(
+        status_json(&home, "managed")["status"]["identity_matches"],
+        true
+    );
+    pp(&home).args(["stop", "managed"]).assert().success();
+    pp(&home)
+        .args(["rename", "managed", "renamed"])
+        .assert()
+        .success();
+    pp(&home).args(["remove", "renamed"]).assert().success();
+    let output = pp(&home).args(["list", "--json"]).output().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!({})
+    );
+}
+
+#[test]
+fn invalid_restart_keeps_existing_process_running() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "managed",
+    };
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .success();
+    let before = status_json(&home, "managed");
+    set(
+        &home,
+        "managed",
+        "dir",
+        home.path().join("missing").to_str().unwrap(),
+    );
+    pp(&home).args(["restart", "managed"]).assert().failure();
+    assert_eq!(
+        before["status"]["pid"],
+        status_json(&home, "managed")["status"]["pid"]
+    );
+}
+
+#[test]
+fn stale_whole_site_update_does_not_overwrite_newer_changes() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    let expected = status_json(&home, "managed")["service"].to_string();
+    set(&home, "managed", "env.NEW", "preserve");
+    pp(&home)
+        .args([
+            "update",
+            "managed",
+            "--expected-config",
+            &expected,
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--command",
+            "exec /bin/sleep 90",
+            "--port",
+            "49002",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("site changed since editing"));
+    assert_eq!(
+        status_json(&home, "managed")["service"]["env"]["NEW"],
+        "preserve"
+    );
+    let current = status_json(&home, "managed")["service"].to_string();
+    pp(&home)
+        .args([
+            "update",
+            "managed",
+            "--expected-config",
+            &current,
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--static",
+            "--port",
+            "49002",
+        ])
+        .assert()
+        .success();
+    assert_eq!(status_json(&home, "managed")["service"]["kind"], "static");
+}
+
+#[test]
+fn stop_remains_available_when_configuration_is_invalid() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "managed",
+    };
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .success();
+    fs::write(
+        home.path().join(".config/preside/config.toml"),
+        "this is invalid TOML = [",
+    )
+    .unwrap();
+    pp(&home).args(["stop", "managed"]).assert().success();
+    assert!(!home
+        .path()
+        .join(".local/state/preside/pids/managed.pid")
+        .exists());
+}
+
+#[test]
+fn process_exiting_during_readiness_is_a_startup_failure() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    drop(listener);
+    pp(&home)
+        .args([
+            "add",
+            "early-exit",
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--command",
+            "sleep 1; exit 7",
+            "--port",
+            &port,
+        ])
+        .assert()
+        .success();
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "early-exit",
+    };
+    pp(&home)
+        .args(["run", "early-exit", "--detach"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "exited while waiting for readiness",
+        ));
+    assert!(!home
+        .path()
+        .join(".local/state/preside/pids/early-exit.pid")
+        .exists());
+}
+
+#[test]
+fn owned_runtime_state_recovers_when_pid_file_is_missing() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "managed",
+    };
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .success();
+    let original = status_json(&home, "managed");
+    fs::remove_file(home.path().join(".local/state/preside/pids/managed.pid")).unwrap();
+    let recovered = status_json(&home, "managed");
+    assert_eq!(recovered["status"]["pid"], original["status"]["pid"]);
+    assert_eq!(recovered["status"]["pid_file_exists"], false);
+    assert_eq!(recovered["status"]["identity_matches"], true);
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already be running"));
+    pp(&home).args(["stop", "managed"]).assert().success();
+    let stopped = status_json(&home, "managed");
+    assert_eq!(stopped["status"]["process_alive"], false);
+    assert!(stopped["status"]["state"].is_null());
+}
+
+#[test]
+fn mismatched_runtime_name_without_pid_never_authorizes_signals_or_replacement() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    long_running_service(&home, &dir);
+    let _cleanup = StopOnDrop {
+        home: &home,
+        name: "managed",
+    };
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .success();
+    let state_path = home
+        .path()
+        .join(".local/state/preside/services/managed.toml");
+    struct RestoreState(std::path::PathBuf, String);
+    impl Drop for RestoreState {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, &self.1);
+        }
+    }
+    let restore = RestoreState(state_path.clone(), fs::read_to_string(&state_path).unwrap());
+    fs::write(
+        &state_path,
+        restore
+            .1
+            .replace("name = \"managed\"", "name = \"different-site\""),
+    )
+    .unwrap();
+    fs::remove_file(home.path().join(".local/state/preside/pids/managed.pid")).unwrap();
+    let unknown = status_json(&home, "managed");
+    assert_eq!(unknown["status"]["process_alive"], true);
+    assert_eq!(unknown["status"]["identity_matches"], false);
+    pp(&home)
+        .args(["run", "managed", "--detach"])
+        .assert()
+        .failure();
+    pp(&home)
+        .args(["stop", "managed"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown process"));
+    pp(&home)
+        .args(["rename", "managed", "new-name"])
+        .assert()
+        .failure();
+    pp(&home).args(["remove", "managed"]).assert().failure();
+    assert_eq!(
+        status_json(&home, "managed")["status"]["process_alive"],
+        true
+    );
+    drop(restore);
+    pp(&home).args(["stop", "managed"]).assert().success();
+}
+
+#[test]
+fn json_logs_are_bounded_lossy_and_read_only() {
+    let home = TempDir::new().unwrap();
+    let path = home.path().join(".local/state/preside/logs/personal.log");
+    pp(&home)
+        .args(["logs", "personal", "--json"])
+        .assert()
+        .success();
+    assert!(!path.exists());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = (0..1100)
+        .map(|i| format!("line {i}: {}\n", "x".repeat(30)))
+        .collect::<String>()
+        .into_bytes();
+    bytes.extend_from_slice(b"invalid \xff\n");
+    fs::write(&path, &bytes).unwrap();
+    let output = pp(&home)
+        .args(["logs", "personal", "--json", "--lines", "2000"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let lines = value["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1000);
+    assert!(lines[0].as_str().unwrap().starts_with("line 101:"));
+    assert_eq!(lines.last().unwrap(), "invalid \u{fffd}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    pp(&home)
+        .args(["logs", "personal", "--json", "--clear"])
+        .assert()
+        .failure();
 }

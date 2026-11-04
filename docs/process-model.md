@@ -145,3 +145,19 @@ Preside also writes lifecycle events to detached logs, for example:
 Preside now stores runtime metadata to reduce PID reuse risk, but it is still not a full supervisor. A future daemon or launchd integration could provide stronger lifecycle management.
 
 Preside does not currently manage reverse proxies, local DNS, TLS, or `/etc/hosts`.
+
+## Static Site Runs
+
+Static definitions launch the same `pp` executable directly in internal static-server mode, passing directory, port, and optional domain as separate arguments. No shell command is constructed for static serving. Foreground and detached static runs share the existing process identity, log, stop, and readiness machinery. Runtime state includes the service kind, so changing a definition between command and static marks the running configuration as stale.
+
+The built-in HTTP server binds to `127.0.0.1`, streams file responses, accepts GET/HEAD only, and canonicalizes requested paths beneath the selected root. It refuses dotfiles, traversal, symlinks outside the root, and unknown Host headers. Use localhost for direct access; optional custom domains require external DNS/proxy configuration.
+
+## Serialized Lifecycle Operations
+
+Detached start, stop, restart, config mutations, and doctor repairs share the cross-process operation lock. Foreground processes and the internal static server do not hold this lock for their lifetime. Concurrent detached starts therefore create only one managed process.
+
+Runtime state and PID files are atomically replaced. If startup cannot persist runtime identity or fails before handoff, Preside terminates and reaps its newly spawned child and removes partial runtime state. A process exiting during readiness checks is reported as a startup failure. Stop returns a failure if termination cannot be confirmed, leaving runtime state available for diagnosis.
+
+Rename and removal require stopped processes. Updates can change the configuration of a verified running site; an explicit restart applies the new configuration.
+
+If PID-file persistence is interrupted after runtime state has been written, status and stop recover the recorded PID from that state. Recovery still requires a matching service name and process start identity before signaling. A live but unverifiable recorded process is shown as unknown and blocks start, stop, rename, and removal. This does not eliminate the earlier crash window between spawning a child and persisting its initial identity.
