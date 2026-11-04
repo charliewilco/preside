@@ -43,7 +43,7 @@ port = 4321
 
 ## Service Fields
 
-Required fields:
+Required fields (`command` is not required when `kind = "static"`):
 
 ```txt
 dir
@@ -54,6 +54,7 @@ port
 Optional fields:
 
 ```txt
+kind
 domain
 env
 readiness
@@ -111,3 +112,17 @@ pp set personal dir ~/Code/personal
 ```
 
 Commands that require a runnable service, such as `pp run` and `pp open`, require `dir`, `command`, and `port` to be present. `pp status` and `pp doctor` can inspect incomplete services.
+
+## Static Site Configuration
+
+```toml
+[services.static-docs]
+kind = "static"
+dir = "~/Code/docs/dist"
+port = 8080
+readiness = "port"
+```
+
+`kind` is `command` or `static`; existing definitions without `kind` remain command services. `command` is required only for command services and is ignored for static sites. Static serving uses Preside's built-in server, requires a port from 1 through 65535, and does not require a system runtime. Choose the public output directory, rather than a repository root containing private files.
+
+A configured domain still requires external DNS/proxy setup. The static server also accepts that domain as a Host header; Preside does not create DNS records or proxies.

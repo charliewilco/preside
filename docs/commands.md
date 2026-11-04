@@ -270,3 +270,18 @@ For dynamic zsh service-name completions, source `contrib/completions/pp.zsh`. T
 ```sh
 pp __complete services
 ```
+
+## Static Sites
+
+Add a static site without installing Node or Python:
+
+```sh
+pp add docs --dir ~/Code/docs/dist --port 8080 --static
+pp run docs --detach
+pp open docs
+pp stop docs
+```
+
+`--static` and `--command` are mutually exclusive. A static site requires a nonzero port. All existing status, logs, doctor, foreground, and detached lifecycle commands work for static sites. `pp set docs kind static` switches an existing definition to static serving; `pp set docs kind command` restores command execution (a command must then be configured).
+
+The built-in server binds only to IPv4 loopback, serves GET/HEAD requests, selects MIME types, and serves `index.html` for directories. Directories without an index return 404; directory listings and SPA fallback routing are not provided. Dotfiles, parent-path traversal, and symlinks escaping the site root are not served. Only localhost, 127.0.0.1, and the explicitly configured domain are accepted as HTTP hosts.

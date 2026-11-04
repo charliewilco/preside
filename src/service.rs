@@ -7,6 +7,8 @@ use thiserror::Error;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
+    #[serde(default)]
+    pub kind: ServiceKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,6 +27,7 @@ pub struct ServiceConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
+    pub kind: ServiceKind,
     pub name: String,
     pub dir: String,
     pub command: String,
@@ -33,6 +36,14 @@ pub struct Service {
     pub readiness: Readiness,
     pub health_path: Option<String>,
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceKind {
+    #[default]
+    Command,
+    Static,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -57,6 +68,7 @@ impl Readiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceField {
     Dir,
+    Kind,
     Command,
     Port,
     Domain,
@@ -68,6 +80,7 @@ pub enum ServiceField {
 impl ServiceField {
     pub fn parse(value: &str) -> Result<ParsedServiceField, ServiceError> {
         match value {
+            "kind" => Ok(ParsedServiceField::Scalar(Self::Kind)),
             "dir" => Ok(ParsedServiceField::Scalar(Self::Dir)),
             "command" => Ok(ParsedServiceField::Scalar(Self::Command)),
             "port" => Ok(ParsedServiceField::Scalar(Self::Port)),
@@ -93,6 +106,13 @@ pub enum ParsedServiceField {
 impl ServiceConfig {
     pub fn set(&mut self, field: ParsedServiceField, value: &str) -> Result<(), ServiceError> {
         match field {
+            ParsedServiceField::Scalar(ServiceField::Kind) => {
+                self.kind = match value {
+                    "command" => ServiceKind::Command,
+                    "static" => ServiceKind::Static,
+                    _ => return Err(ServiceError::InvalidKind(value.to_string())),
+                };
+            }
             ParsedServiceField::Scalar(ServiceField::Dir) => {
                 validate_required_value("dir", value)?;
                 self.dir = Some(value.to_string());
@@ -130,6 +150,7 @@ impl ServiceConfig {
 
     pub fn unset(&mut self, field: ParsedServiceField) {
         match field {
+            ParsedServiceField::Scalar(ServiceField::Kind) => self.kind = ServiceKind::Command,
             ParsedServiceField::Scalar(ServiceField::Dir) => self.dir = None,
             ParsedServiceField::Scalar(ServiceField::Command) => self.command = None,
             ParsedServiceField::Scalar(ServiceField::Port) => self.port = None,
@@ -145,17 +166,24 @@ impl ServiceConfig {
 
     pub fn validate(&self, name: &str) -> Result<Service, ServiceError> {
         validate_service_name(name)?;
+        if self.kind == ServiceKind::Static && self.port == Some(0) {
+            return Err(ServiceError::InvalidPort("0 (static site)".to_string()));
+        }
 
         Ok(Service {
+            kind: self.kind,
             name: name.to_string(),
             dir: self
                 .dir
                 .clone()
                 .ok_or_else(|| ServiceError::MissingField(name.to_string(), "dir"))?,
-            command: self
-                .command
-                .clone()
-                .ok_or_else(|| ServiceError::MissingField(name.to_string(), "command"))?,
+            command: match self.kind {
+                ServiceKind::Static => String::new(),
+                ServiceKind::Command => self
+                    .command
+                    .clone()
+                    .ok_or_else(|| ServiceError::MissingField(name.to_string(), "command"))?,
+            },
             port: self
                 .port
                 .ok_or_else(|| ServiceError::MissingField(name.to_string(), "port"))?,
@@ -246,6 +274,8 @@ fn validate_health_path(path: &str) -> Result<(), ServiceError> {
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error("invalid service kind '{0}'. expected command or static")]
+    InvalidKind(String),
     #[error("service '{0}' is not configured")]
     MissingService(String),
     #[error("service '{0}' already exists")]
@@ -254,7 +284,7 @@ pub enum ServiceError {
     MissingField(String, &'static str),
     #[error("invalid service name '{0}'. use letters, numbers, dots, dashes, or underscores, and start with a letter or number")]
     InvalidName(String),
-    #[error("invalid field '{0}'. expected one of: dir, command, port, domain, readiness, health_path, env.<KEY>")]
+    #[error("invalid field '{0}'. expected one of: kind, dir, command, port, domain, readiness, health_path, env.<KEY>")]
     InvalidField(String),
     #[error("invalid port '{0}'. expected a number from 0 to 65535")]
     InvalidPort(String),

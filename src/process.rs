@@ -15,7 +15,7 @@ use nix::unistd::{setsid, Pid};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::PresidePaths;
-use crate::service::{validate_service_name, Readiness, Service};
+use crate::service::{validate_service_name, Readiness, Service, ServiceKind};
 
 const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 const STARTUP_ALIVE_WAIT: Duration = Duration::from_millis(500);
@@ -41,6 +41,8 @@ pub struct ServiceStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceState {
+    #[serde(default)]
+    pub kind: ServiceKind,
     pub name: String,
     pub pid: u32,
     pub dir: String,
@@ -61,7 +63,7 @@ pub struct ServiceState {
 
 pub fn run_foreground(service: &Service) -> Result<ExitCode> {
     let dir = expand_service_dir(service)?;
-    let status = service_command(service)
+    let status = service_command(service)?
         .current_dir(&dir)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -122,7 +124,7 @@ pub fn run_detached(service: &Service, paths: &PresidePaths) -> Result<()> {
         .try_clone()
         .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
 
-    let mut command = service_command(service);
+    let mut command = service_command(service)?;
     command
         .current_dir(&dir)
         .stdin(Stdio::null())
@@ -390,10 +392,20 @@ pub fn recent_log_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
         File::open(path).with_context(|| format!("failed to open log file {}", path.display()))?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(16 * 1024);
-    file.seek(SeekFrom::Start(start))?;
+    let read_start = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(read_start))?;
 
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
+    let mut bytes = Vec::new();
+    file.take(len - read_start).read_to_end(&mut bytes)?;
+    let complete_lines = if start > 0 {
+        match bytes.iter().position(|byte| *byte == b'\n') {
+            Some(newline) => &bytes[newline + 1..],
+            None => &[],
+        }
+    } else {
+        &bytes[..]
+    };
+    let contents = String::from_utf8_lossy(complete_lines);
 
     let mut result = contents
         .lines()
@@ -409,9 +421,14 @@ pub fn recent_log_lines(path: &Path, lines: usize) -> Result<Vec<String>> {
 impl ServiceState {
     fn new(service: &Service, pid: u32, dir: &Path, log_path: &Path) -> Self {
         Self {
+            kind: service.kind,
             name: service.name.clone(),
             pid,
-            dir: dir.display().to_string(),
+            dir: dir
+                .canonicalize()
+                .unwrap_or_else(|_| dir.to_path_buf())
+                .display()
+                .to_string(),
             command: service.command.clone(),
             port: service.port,
             domain: service.domain.clone(),
@@ -425,7 +442,15 @@ impl ServiceState {
     }
 
     fn matches_service(&self, service: &Service) -> bool {
+        let configured_dir = expand_service_dir(service)
+            .ok()
+            .and_then(|dir| dir.canonicalize().ok());
+        let recorded_dir = Path::new(&self.dir).canonicalize().ok();
         self.name == service.name
+            && self.kind == service.kind
+            && configured_dir
+                .zip(recorded_dir)
+                .is_some_and(|(configured, recorded)| configured == recorded)
             && self.command == service.command
             && self.port == service.port
             && self.domain == service.domain
@@ -435,11 +460,30 @@ impl ServiceState {
     }
 }
 
-fn service_command(service: &Service) -> Command {
-    let mut command = Command::new("sh");
+fn service_command(service: &Service) -> Result<Command> {
+    let mut command = match service.kind {
+        ServiceKind::Command => {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(&service.command);
+            command
+        }
+        ServiceKind::Static => {
+            let mut command = Command::new(
+                std::env::current_exe().context("could not locate Preside executable")?,
+            );
+            command
+                .arg("__serve-static")
+                .arg("--dir")
+                .arg(expand_service_dir(service)?)
+                .arg("--port")
+                .arg(service.port.to_string());
+            if let Some(domain) = &service.domain {
+                command.arg("--domain").arg(domain);
+            }
+            command
+        }
+    };
     command
-        .arg("-c")
-        .arg(&service.command)
         .env("PORT", service.port.to_string())
         .env("PRESIDE_NAME", &service.name);
 
@@ -451,7 +495,7 @@ fn service_command(service: &Service) -> Command {
         command.env(key, value);
     }
 
-    command
+    Ok(command)
 }
 
 fn open_log(path: &Path) -> Result<File> {
@@ -580,7 +624,6 @@ fn state_identifies_process(state: &ServiceState, pid: i32) -> bool {
 
     match (&state.process_started_at, process_started_at(pid)) {
         (Some(expected), Some(actual)) => expected == &actual,
-        (None, _) => true,
         _ => false,
     }
 }
@@ -645,6 +688,10 @@ fn http_ready(port: u16, path: &str) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) else {
         return false;
     };
+    let timeout = Some(Duration::from_millis(100));
+    if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
+        return false;
+    }
 
     let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     if stream.write_all(request.as_bytes()).is_err() {
@@ -734,10 +781,14 @@ fn system_time_unix(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     fn service(domain: Option<&str>) -> Service {
         Service {
+            kind: ServiceKind::Command,
             name: "personal".to_string(),
             dir: ".".to_string(),
             command: "true".to_string(),
@@ -787,5 +838,98 @@ mod tests {
             recent_log_lines(&log_path, 2).unwrap(),
             vec!["two".to_string(), "three".to_string()]
         );
+    }
+
+    #[test]
+    fn recent_log_lines_decodes_invalid_utf8_lossily() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("personal.log");
+        fs::write(&log_path, b"one\ninvalid \xff\nthree\n").unwrap();
+
+        assert_eq!(
+            recent_log_lines(&log_path, 3).unwrap(),
+            vec!["one", "invalid \u{fffd}", "three"]
+        );
+    }
+
+    #[test]
+    fn recent_log_lines_discards_partial_first_line() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("personal.log");
+        let contents = format!("{}\nlast\n", "é".repeat(8192));
+        fs::write(&log_path, contents).unwrap();
+
+        assert_eq!(recent_log_lines(&log_path, 2).unwrap(), vec!["last"]);
+    }
+
+    #[test]
+    fn recent_log_lines_preserves_line_at_window_boundary() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("personal.log");
+        let last_line = "x".repeat(16 * 1024 - 1);
+        fs::write(&log_path, format!("first\n{last_line}\n")).unwrap();
+
+        assert_eq!(recent_log_lines(&log_path, 2).unwrap(), vec![last_line]);
+    }
+
+    #[test]
+    fn runtime_state_detects_changed_static_root() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let mut configured = service(None);
+        configured.kind = ServiceKind::Static;
+        configured.dir = first.path().display().to_string();
+        let state = ServiceState::new(
+            &configured,
+            std::process::id(),
+            first.path(),
+            Path::new("log"),
+        );
+        assert!(state.matches_service(&configured));
+        configured.dir = second.path().display().to_string();
+        assert!(!state.matches_service(&configured));
+    }
+
+    #[test]
+    fn missing_start_marker_does_not_identify_process() {
+        let pid = std::process::id();
+        let mut state = ServiceState::new(&service(None), pid, Path::new("."), Path::new("log"));
+        state.process_started_at = None;
+
+        assert!(!state_identifies_process(&state, pid as i32));
+    }
+
+    #[test]
+    fn mismatched_start_marker_does_not_identify_process() {
+        let pid = std::process::id();
+        let mut state = ServiceState::new(&service(None), pid, Path::new("."), Path::new("log"));
+        state.process_started_at = Some("different process".to_string());
+
+        assert!(!state_identifies_process(&state, pid as i32));
+    }
+
+    #[test]
+    fn http_readiness_times_out_when_server_does_not_respond() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release, wait) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            let _ = wait.recv_timeout(Duration::from_secs(2));
+        });
+
+        let started = Instant::now();
+        let ready = http_ready(port, "/health");
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        server.join().unwrap();
+
+        assert!(!ready);
+        assert!(elapsed < Duration::from_secs(1), "elapsed: {elapsed:?}");
     }
 }

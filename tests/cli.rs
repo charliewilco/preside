@@ -429,6 +429,29 @@ fn completions_print_shell_completion_script() {
 }
 
 #[test]
+fn status_json_tolerates_non_utf8_service_output() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    configure_service(&home, "personal", dir.path().to_str().unwrap(), "true");
+    let log_dir = home.path().join(".local/state/preside/logs");
+    fs::create_dir_all(&log_dir).unwrap();
+    fs::write(log_dir.join("personal.log"), b"output \xff\nready\n").unwrap();
+
+    let output = pp(&home)
+        .args(["status", "personal", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        report["status"]["recent_log_lines"],
+        serde_json::json!(["output \u{fffd}", "ready"])
+    );
+}
+
+#[test]
 fn detached_run_status_logs_and_stop_work() {
     let home = TempDir::new().unwrap();
     let dir = TempDir::new().unwrap();
@@ -535,4 +558,149 @@ fn detached_run_refuses_occupied_port() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("already appears to be in use"));
+}
+
+#[test]
+fn static_site_rejects_command_and_zero_port() {
+    let home = TempDir::new().unwrap();
+    for extra in [vec!["--command", "echo wrong"], vec!["--port", "0"]] {
+        let mut args = vec!["add", "site", "--dir", "/tmp", "--static"];
+        if extra[0] != "--port" {
+            args.extend(["--port", "8080"]);
+        }
+        args.extend(extra);
+        pp(&home).args(args).assert().failure();
+    }
+    pp(&home)
+        .args(["add", "site", "--dir", "/tmp", "--static", "--port", "8080"])
+        .assert()
+        .success();
+    set(&home, "site", "port", "0");
+    pp(&home)
+        .args(["run", "site", "--detach"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("static site"));
+}
+
+#[test]
+fn static_site_lifecycle_serves_assets_and_rejects_escape_paths() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::os::unix::fs::symlink;
+    use std::time::Duration;
+
+    let home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let root = files.path().join("site with spaces");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::create_dir_all(root.join("empty")).unwrap();
+    fs::write(root.join("index.html"), "<h1>Preside static</h1>").unwrap();
+    fs::write(root.join("app.js"), "console.log('static');").unwrap();
+    fs::write(root.join("icon.svg"), "<svg/>").unwrap();
+    fs::write(root.join("what?#.txt"), "encoded filename").unwrap();
+    fs::write(root.join("nested/index.html"), "nested page").unwrap();
+    fs::write(root.join(".env"), "PRIVATE_VALUE").unwrap();
+    fs::write(files.path().join("secret.txt"), "OUTSIDE_ROOT").unwrap();
+    symlink(files.path().join("secret.txt"), root.join("escape.txt")).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    pp(&home)
+        .args([
+            "add",
+            "static-site",
+            "--dir",
+            root.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+            "--static",
+            "--domain",
+            "site.example",
+            "--readiness",
+            "http",
+        ])
+        .assert()
+        .success();
+    let result = pp(&home)
+        .args(["status", "static-site", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(status["service"]["kind"], "static");
+    assert_eq!(status["missing_fields"], serde_json::json!([]));
+    assert!(status["service"].get("command").is_none());
+    pp(&home)
+        .args(["run", "static-site", "--detach"])
+        .assert()
+        .success();
+    struct StopOnDrop<'a>(&'a TempDir);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = pp(self.0).args(["stop", "static-site"]).output();
+        }
+    }
+    let _cleanup = StopOnDrop(&home);
+    let request = |method: &str, path: &str, host: &str| {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut result = String::new();
+        stream.read_to_string(&mut result).unwrap();
+        result
+    };
+    let host = format!("localhost:{port}");
+    let index = request("GET", "/", &host);
+    assert!(index.starts_with("HTTP/1.1 200"), "{index}");
+    assert!(index.contains("text/html"));
+    assert!(request("GET", "/", "site.example").starts_with("HTTP/1.1 200"));
+    assert!(index.ends_with("<h1>Preside static</h1>"));
+    let asset = request("GET", "/app.js?cache=1", &host);
+    assert!(asset.starts_with("HTTP/1.1 200"));
+    assert!(asset.contains("javascript"));
+    assert!(request("GET", "/icon.svg", &host).contains("image/svg+xml"));
+    assert!(request("GET", "/what%3F%23.txt", &host).ends_with("encoded filename"));
+    let head = request("HEAD", "/", &host);
+    assert!(head.starts_with("HTTP/1.1 200"));
+    assert!(head.ends_with("\r\n\r\n"));
+    assert!(request("GET", "/nested", &host).starts_with("HTTP/1.1 301"));
+    assert!(request("GET", "/nested?query=1", &host).contains("Location: /nested/?query=1"));
+    assert!(request("GET", "/nested/", &host).ends_with("nested page"));
+    for path in ["/missing", "/empty/"] {
+        assert!(request("GET", path, &host).starts_with("HTTP/1.1 404"));
+    }
+    for path in [
+        "/../secret.txt",
+        "/%2e%2e/secret.txt",
+        "/%2e%2e%2fsecret.txt",
+        "/escape.txt",
+        "/.env",
+    ] {
+        let response = request("GET", path, &host);
+        assert!(response.starts_with("HTTP/1.1 403"), "{path}: {response}");
+        assert!(!response.contains("OUTSIDE_ROOT"));
+        assert!(!response.contains("PRIVATE_VALUE"));
+    }
+    assert!(request("POST", "/", &host).starts_with("HTTP/1.1 405"));
+    assert!(request("GET", "/", "untrusted.example").starts_with("HTTP/1.1 403"));
+    pp(&home).args(["stop", "static-site"]).assert().success();
+    let result = pp(&home)
+        .args(["status", "static-site", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(status["status"]["process_alive"], false);
+    assert_eq!(status["status"]["listening"], false);
 }

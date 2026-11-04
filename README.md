@@ -19,6 +19,17 @@ pp add personal --dir ~/Code/personal --command "npm run dev" --port 8712 --doma
 pp r personal
 ```
 
+## macOS App
+
+Build the native service browser and menu bar app:
+
+```sh
+just macos-build
+open dist/Preside.app
+```
+
+Requires macOS 14+, Rust, and Xcode with Swift 6+. The app bundles `pp` and shares your existing services. Use **Add Site…** in its menu bar to serve a static folder or run a server command. See [docs/macos.md](docs/macos.md) for setup, PATH configuration, and current limits.
+
 ## Install
 
 From this repository:
@@ -74,6 +85,19 @@ pp open personal
 ```
 
 `pp open` uses `http://<domain>` when `domain` is configured, otherwise `http://localhost:<port>`.
+
+## Static Sites
+
+Serve a folder without installing another server:
+
+```sh
+pp add docs --dir ~/Code/docs/dist --port 8080 --static
+pp run docs --detach
+pp open docs
+pp stop docs
+```
+
+Static sites use Preside's built-in loopback-only HTTP server. Existing command-based services continue to work unchanged.
 
 ## Commands
 
@@ -184,4 +208,4 @@ See [docs/development.md](docs/development.md) for local and CI notes.
 
 This is v1: named local services, config, foreground and detached process management, PID tracking, logs, status, and open/stop helpers.
 
-Preside does not currently implement a daemon, launchd integration, reverse proxying, TLS, `/etc/hosts` edits, or the future macOS menu bar app.
+A native macOS app now exposes service browsing, start/stop, logs, diagnostics, and service creation. Preside does not currently implement a daemon, launchd integration, reverse proxying, TLS, or `/etc/hosts` edits.

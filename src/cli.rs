@@ -16,6 +16,15 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(name = "__serve-static", hide = true)]
+    ServeStatic {
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        #[arg(long)]
+        port: u16,
+        #[arg(long)]
+        domain: Option<String>,
+    },
     List {
         #[arg(long)]
         json: bool,
@@ -24,8 +33,14 @@ pub enum Commands {
         service: String,
         #[arg(long)]
         dir: String,
-        #[arg(long)]
-        command: String,
+        #[arg(
+            long,
+            required_unless_present = "static_site",
+            conflicts_with = "static_site"
+        )]
+        command: Option<String>,
+        #[arg(long = "static")]
+        static_site: bool,
         #[arg(long)]
         port: u16,
         #[arg(long)]

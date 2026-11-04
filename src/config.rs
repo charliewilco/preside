@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::service::{
     validate_service_name, Readiness, Service, ServiceConfig, ServiceError, ServiceField,
+    ServiceKind,
 };
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -56,7 +57,13 @@ impl Config {
 
         let mut config = ServiceConfig::default();
         config.set(ServiceField::parse("dir")?, &service.dir)?;
-        config.set(ServiceField::parse("command")?, &service.command)?;
+        config.kind = service.kind;
+        if let Some(command) = &service.command {
+            config.set(ServiceField::parse("command")?, command)?;
+        }
+        if service.kind == ServiceKind::Static && service.port == 0 {
+            anyhow::bail!("static sites require a port between 1 and 65535");
+        }
         config.set(ServiceField::parse("port")?, &service.port.to_string())?;
 
         if let Some(domain) = &service.domain {
@@ -78,6 +85,7 @@ impl Config {
             config.set(ServiceField::parse(&format!("env.{key}"))?, value)?;
         }
 
+        config.validate(&service.name)?;
         self.services.insert(service.name, config);
 
         Ok(())
@@ -136,7 +144,8 @@ impl Config {
 pub struct AddService {
     pub name: String,
     pub dir: String,
-    pub command: String,
+    pub command: Option<String>,
+    pub kind: ServiceKind,
     pub port: u16,
     pub domain: Option<String>,
     pub readiness: Option<Readiness>,

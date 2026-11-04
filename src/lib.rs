@@ -3,6 +3,7 @@ pub mod config;
 pub mod paths;
 pub mod process;
 pub mod service;
+pub mod static_site;
 
 use std::process::ExitCode;
 
@@ -15,10 +16,15 @@ use clap_complete::generate;
 
 pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    if let Commands::ServeStatic { dir, port, domain } = &cli.command {
+        static_site::serve(dir, *port, domain.as_deref())?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let paths = PresidePaths::discover()?;
     let mut config = Config::load(&paths.config_path)?;
 
     match cli.command {
+        Commands::ServeStatic { .. } => unreachable!(),
         Commands::List { json } => {
             commands::list(&config, json)?;
             Ok(ExitCode::SUCCESS)
@@ -27,6 +33,7 @@ pub fn run() -> Result<ExitCode> {
             service,
             dir,
             command,
+            static_site,
             port,
             domain,
             readiness,
@@ -35,6 +42,11 @@ pub fn run() -> Result<ExitCode> {
         } => {
             config.add_service(AddService {
                 name: service.clone(),
+                kind: if static_site {
+                    crate::service::ServiceKind::Static
+                } else {
+                    crate::service::ServiceKind::Command
+                },
                 dir,
                 command,
                 port,
@@ -637,7 +649,7 @@ mod commands {
             fields.push("dir");
         }
 
-        if service.command.is_none() {
+        if service.kind == crate::service::ServiceKind::Command && service.command.is_none() {
             fields.push("command");
         }
 

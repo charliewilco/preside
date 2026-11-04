@@ -145,3 +145,9 @@ Preside also writes lifecycle events to detached logs, for example:
 Preside now stores runtime metadata to reduce PID reuse risk, but it is still not a full supervisor. A future daemon or launchd integration could provide stronger lifecycle management.
 
 Preside does not currently manage reverse proxies, local DNS, TLS, or `/etc/hosts`.
+
+## Static Site Runs
+
+Static definitions launch the same `pp` executable directly in internal static-server mode, passing directory, port, and optional domain as separate arguments. No shell command is constructed for static serving. Foreground and detached static runs share the existing process identity, log, stop, and readiness machinery. Runtime state includes the service kind, so changing a definition between command and static marks the running configuration as stale.
+
+The built-in HTTP server binds to `127.0.0.1`, streams file responses, accepts GET/HEAD only, and canonicalizes requested paths beneath the selected root. It refuses dotfiles, traversal, symlinks outside the root, and unknown Host headers. Use localhost for direct access; optional custom domains require external DNS/proxy configuration.
