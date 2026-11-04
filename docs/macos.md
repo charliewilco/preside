@@ -55,4 +55,4 @@ PRESIDE_TEST_CLI="$PWD/target/release/pp" just macos-test
 
 Build the app first for the release CLI integration test. Swift tests use temporary files and an isolated HOME for service lifecycle checks. Without `PRESIDE_TEST_CLI`, the real CLI lifecycle test is skipped. The test script builds in temporary storage to avoid Finder metadata interfering with test-bundle signing in synced directories.
 
-The GitHub Actions macOS job checks Swift formatting, builds the bundle, and runs tests with the bundled CLI's release binary. This is separate from Rust's Linux/macOS checks.
+Run Swift formatting, app builds, and app/CLI integration tests locally. GitHub Actions runs only Rust's Linux/macOS checks; it does not build or test the macOS app.

@@ -2,7 +2,7 @@
 
 The first distributed macOS app targets Apple Silicon and macOS 14 or later. Intel builds remain a local development option; the release workflow does not claim universal support. The Rust CLI is also packaged for Linux x86_64.
 
-`Cargo.toml` is the app's marketing version source. The build script writes that version into the app bundle, and release tags must match `v<version>`. `PRESIDE_BUILD_NUMBER` controls `CFBundleVersion`; local builds default to 1 and GitHub releases use the workflow run number.
+`Cargo.toml` is the app's marketing version source. The build script writes that version into the app bundle, and release tags must match `v<version>`. `PRESIDE_BUILD_NUMBER` controls `CFBundleVersion`; local builds default to 1. Set an increasing build number when preparing a distributed app.
 
 ## Local development packages
 
@@ -32,22 +32,13 @@ Distribution mode fails when credentials are missing. It signs both `pp` and the
 
 The app inside the distribution ZIP carries a stapled ticket. The DMG carries its own ticket in addition to the enclosed app's ticket. A failed signing or notarization operation never becomes a successful development fallback.
 
-## GitHub release configuration
+## GitHub releases
 
-The tag-triggered release workflow requires a GitHub environment named `release`. Configure these secrets in that environment:
+GitHub Actions validates and builds the Rust CLI only. The macOS app is built, tested, signed, and notarized locally with the scripts above; no app build or signing credentials are configured in CI.
 
-| Secret | Value |
-| --- | --- |
-| `MACOS_CERTIFICATE_BASE64` | Base64-encoded PKCS#12 containing the Developer ID Application certificate and private key |
-| `MACOS_CERTIFICATE_PASSWORD` | Password protecting that PKCS#12 |
-| `MACOS_SIGNING_IDENTITY` | Developer ID Application certificate name or fingerprint |
-| `APPLE_API_KEY_BASE64` | Base64-encoded App Store Connect API `.p8` key authorized for notarization |
-| `APPLE_API_KEY_ID` | API key ID |
-| `APPLE_API_ISSUER` | API issuer ID |
+The tag-triggered release workflow publishes the Linux and macOS CLI archives. After reviewing changes, passing the Rust checks, and updating the version, create and push the matching version tag. Tagging publishes release assets and is a separate action from pushing a development branch.
 
-The workflow imports credentials into a temporary keychain and removes them in an always-run cleanup step. No credentials belong in this repository. The release publication job depends on successful CLI and notarized-app builds; missing credentials block publication rather than producing a CLI-only release silently.
-
-After reviewing changes, passing CI, and updating the version, create and push the matching version tag. Tagging publishes release assets and is a separate release action from pushing a development branch.
+Prepare and validate the signed app locally, then upload its distribution ZIP, DMG, and checksum manifest to the matching GitHub Release. Do not upload development packages as public distribution artifacts. A CLI release alone does not satisfy the macOS app release acceptance gates.
 
 ## Acceptance before public release
 

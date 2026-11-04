@@ -37,7 +37,7 @@ Preside v1 is complete when a user can install the macOS app, add either a stati
 - [x] Verify local app replacement preserves site configuration and control of running static/command sites.
 - [x] Verify local PATH preference continuity and unchanged bundled-CLI selection across app replacement.
 - [ ] Verify signed/quarantined upgrades of the distributed app.
-- [ ] Confirm hosted CI for the final release commit, then publish the versioned app and CLI artifacts.
+- [ ] Confirm hosted Rust CI and local macOS app validation for the final release commit, then publish the versioned app and CLI artifacts.
 
 The app uses manual downloads from GitHub Releases for updates. Automatic DNS/HTTPS, a daemon/supervisor, automatic server startup, Docker management, and cloud sync are outside this v1 scope. SPA fallback and launching the app at login remain optional enhancements.
 
